@@ -102,6 +102,133 @@ describe("assertSqliteIntegrity", () => {
     });
   });
 
+  it("classifies cascade-owned task delivery orphans without admitting writes", () => {
+    const database = new (requireNodeSqlite().DatabaseSync)(":memory:");
+    try {
+      database.exec(`
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE task_runs (task_id TEXT PRIMARY KEY);
+        CREATE TABLE task_delivery_state (
+          task_id TEXT PRIMARY KEY REFERENCES task_runs(task_id) ON DELETE CASCADE
+        );
+        INSERT INTO task_delivery_state (task_id)
+        VALUES ('missing-1'), ('missing-2'), ('missing-3'), ('missing-4'),
+               ('missing-5'), ('missing-6');
+      `);
+
+      let failure: unknown;
+      try {
+        assertSqliteIntegrity(database, "test database");
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({
+        name: "SqliteRepairableForeignKeyError",
+        repair: {
+          kind: "task-delivery-orphans",
+          relation: "task_delivery_state.task_id",
+          parentTable: "task_runs",
+          orphanCount: 6,
+        },
+        message: expect.stringMatching(/foreign_key_check failed.*openclaw doctor --fix/u),
+      });
+      if (!(failure instanceof Error)) {
+        throw new Error("Expected integrity admission to refuse unrepaired rows");
+      }
+      expect(isTerminalSqliteIntegrityError(failure)).toBe(false);
+      expect(database.prepare("SELECT count(*) AS count FROM task_delivery_state").get()).toEqual({
+        count: 6,
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each([
+    {
+      label: "non-cascade deletion",
+      parent: "task_id",
+      child: "task_id",
+      action: "NO ACTION",
+      extra: "",
+    },
+    {
+      label: "different parent column",
+      parent: "other_id",
+      child: "task_id",
+      action: "CASCADE",
+      extra: "",
+    },
+    {
+      label: "different child column",
+      parent: "task_id",
+      child: "other_id",
+      action: "CASCADE",
+      extra: "",
+    },
+    {
+      label: "unrelated violation beyond the diagnostic sample",
+      parent: "task_id",
+      child: "task_id",
+      action: "CASCADE",
+      extra: `CREATE TABLE unrelated (id TEXT REFERENCES task_runs(task_id));
+              INSERT INTO unrelated (id) VALUES ('missing');`,
+    },
+    {
+      label: "structural damage alongside otherwise repairable orphans",
+      parent: "task_id",
+      child: "task_id",
+      action: "CASCADE",
+      extra: `CREATE TABLE damaged (id INTEGER CHECK (id > 0));
+              PRAGMA ignore_check_constraints = ON;
+              INSERT INTO damaged (id) VALUES (-1);
+              PRAGMA ignore_check_constraints = OFF;`,
+    },
+  ])("refuses task delivery violations with $label", ({ parent, child, action, extra }) => {
+    const database = new (requireNodeSqlite().DatabaseSync)(":memory:");
+    try {
+      database.exec(`
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE task_runs (task_id TEXT PRIMARY KEY, other_id TEXT UNIQUE);
+        CREATE TABLE task_delivery_state (
+          ${child} TEXT PRIMARY KEY REFERENCES task_runs(${parent}) ON DELETE ${action}
+        );
+        INSERT INTO task_delivery_state (${child})
+        VALUES ('missing-1'), ('missing-2'), ('missing-3'), ('missing-4'),
+               ('missing-5'), ('missing-6');
+        ${extra}
+      `);
+
+      expect(() => assertSqliteIntegrity(database, "test database")).toThrow(
+        expect.objectContaining({ name: "SqliteIntegrityError" }),
+      );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("does not classify a component of a composite foreign key as repairable", () => {
+    const database = new (requireNodeSqlite().DatabaseSync)(":memory:");
+    try {
+      database.exec(`
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE task_runs (task_id TEXT, revision INTEGER, PRIMARY KEY (task_id, revision));
+        CREATE TABLE task_delivery_state (
+          task_id TEXT PRIMARY KEY,
+          revision INTEGER,
+          FOREIGN KEY (task_id, revision) REFERENCES task_runs(task_id, revision) ON DELETE CASCADE
+        );
+        INSERT INTO task_delivery_state (task_id, revision) VALUES ('missing', 1);
+      `);
+
+      expect(() => assertSqliteIntegrity(database, "test database")).toThrow(
+        expect.objectContaining({ name: "SqliteIntegrityError" }),
+      );
+    } finally {
+      database.close();
+    }
+  });
+
   it("reports violations deterministically without truncating 64-bit rowids", () => {
     const sqlite = requireNodeSqlite();
     const database = new sqlite.DatabaseSync(":memory:");
@@ -385,20 +512,20 @@ describe("confirmSqliteFileIntegrity", () => {
 describe("SQLite integrity child", () => {
   afterEach(() => vi.restoreAllMocks());
   it.each([
-    { label: "empty", paddingBytes: null, minimumSize: 0, maximumSize: 0, timeout: 30_000 },
+    { label: "empty", paddingBytes: null, minimumSize: 0, maximumSize: 0, timeout: 300_000 },
     {
       label: "small",
       paddingBytes: 0,
       minimumSize: 1,
       maximumSize: 32 * 1024 * 1024,
-      timeout: 31_000,
+      timeout: 301_000,
     },
     {
       label: "over 64 MiB",
       paddingBytes: 64 * 1024 * 1024,
       minimumSize: 64 * 1024 * 1024 + 1,
       maximumSize: 96 * 1024 * 1024,
-      timeout: 33_000,
+      timeout: 381_000,
     },
   ])(
     "starts the child with the size budget for a $label database",
@@ -430,6 +557,32 @@ describe("SQLite integrity child", () => {
     },
   );
 
+  it("budgets integrity for committed WAL data while its writer remains open", async () => {
+    const source = path.join(tempDirs.make("openclaw-integrity-wal-budget-"), "source.sqlite");
+    const writer = new (requireNodeSqlite().DatabaseSync)(source);
+    try {
+      writer.exec(
+        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE padding (data BLOB)",
+      );
+      writer.prepare("INSERT INTO padding VALUES (zeroblob(?))").run(32 * 1024 * 1024);
+      expect(fs.statSync(source).size).toBeLessThan(32 * 1024);
+      expect(fs.statSync(`${source}-wal`).size).toBeGreaterThan(32 * 1024 * 1024);
+      vi.mocked(fork).mockClear();
+
+      await expect(
+        assertSqliteIntegrityInWorker(source, 250, new AbortController().signal),
+      ).resolves.toBeUndefined();
+
+      expect(fork).toHaveBeenCalledExactlyOnceWith(
+        expect.any(URL),
+        [],
+        expect.objectContaining({ timeout: 341_000, killSignal: "SIGKILL" }),
+      );
+    } finally {
+      writer.close();
+    }
+  });
+
   it("kills a stuck scan at its deadline before releasing ownership", async () => {
     const root = tempDirs.make("openclaw-integrity-timeout-");
     const source = path.join(root, "source.sqlite");
@@ -454,7 +607,7 @@ describe("SQLite integrity child", () => {
     let closeSignal: NodeJS.Signals | null | undefined;
     // Keep native IPC, timeout, and close behavior while shortening only the test wait.
     vi.mocked(fork).mockImplementationOnce((modulePath, args, options) => {
-      expect(options).toMatchObject({ timeout: 31_000, killSignal: "SIGKILL" });
+      expect(options).toMatchObject({ timeout: 301_000, killSignal: "SIGKILL" });
       const child = actual.fork(modulePath, args, { ...options, timeout: 2_000 });
       childClosed = new Promise<void>((resolve) => {
         child.once("close", (_code, signal) => {
@@ -472,7 +625,7 @@ describe("SQLite integrity child", () => {
           expect(closeSignal).toBe("SIGKILL");
         }),
       ).rejects.toThrow(
-        `SQLite integrity check timed out after 31 seconds (budget for 15 B) for ${source}. Stop the Gateway service and other OpenClaw processes using this database, then retry; if already stopped, check storage performance. (lastObservedPhase=checking)`,
+        `SQLite integrity check timed out after 301 seconds (budget for 15 B) for ${source}. Stop the Gateway service and other OpenClaw processes using this database, then retry; if already stopped, check storage performance. (lastObservedPhase=checking)`,
       );
       expect(performance.now() - started).toBeLessThan(8_000);
       expect(fs.readFileSync(ready, "utf8")).toBe("ready");

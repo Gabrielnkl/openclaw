@@ -89,6 +89,7 @@ export async function runCodeModeExec(params: {
   const namespaceRuntime = createCodeModeNamespaceRuntime(namespaceCatalog);
   const catalogProjection = createCodeModeCatalogProjection(runtime.all({ includeMcp: false }), {
     reservedNames: namespaceRuntime.descriptors.map((descriptor) => descriptor.globalName),
+    mcpIds: namespaceRuntime.mcpBindings.keys(),
   });
   const apiFiles = createCodeModeApiFilesForRun(namespaceRuntime, swarmEnabled);
   const owner = createCodeModeRunOwner(params.ctx, config);
@@ -312,6 +313,7 @@ function dispatchCodeModeRequests(
     ...createPendingBridgeStates(newPendingRequests, {
       config: params.config,
       inbox: params.owner.inbox,
+      results: params.owner.results,
       runtime: params.runtime,
       catalogProjection: params.catalogProjection,
       namespaceRuntime: params.namespaceRuntime,

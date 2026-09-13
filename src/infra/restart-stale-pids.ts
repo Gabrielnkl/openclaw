@@ -23,6 +23,7 @@ import {
   type WindowsProcessArgsResult,
   type WindowsListeningPidsResult,
 } from "./windows-port-pids.js";
+import { readWindowsProcessAncestorsSync } from "./windows-process-start.js";
 
 // macOS lsof needs seconds on hosts with many mounted volumes; keep that
 // allowance separate so process and ancestor probes retain their tighter bound.
@@ -152,7 +153,7 @@ function readParentPidFromPs(pid: number, spawnTimeoutMs: number): number | null
  *
  * The walk is best-effort. `process.ppid` is provided by Node via a direct
  * syscall and is always available; transitive ancestors are read on Linux via
- * `/proc` and on macOS via `ps`. Windows stops at ppid.
+ * `/proc`, on macOS via `ps`, and on Windows from one process snapshot.
  *
  * The function exposes no runtime hooks. Tests exercise the real walk by
  * stubbing `process.ppid` (and, on Linux, by mocking `node:fs` to inject
@@ -161,13 +162,28 @@ function readParentPidFromPs(pid: number, spawnTimeoutMs: number): number | null
  */
 export function getSelfAndAncestorPidsSync(
   spawnTimeoutMs = PROCESS_INSPECTION_TIMEOUT_MS,
+  options: { requireVerifiedParent?: boolean } = {},
 ): Set<number> {
   const pids = new Set<number>([process.pid]);
   const immediateParent = process.ppid;
   if (!Number.isFinite(immediateParent) || immediateParent <= 0) {
     return pids;
   }
-  pids.add(immediateParent);
+  // Windows retains an inherited PID after parent exit. Cleanup can exclude it
+  // conservatively, but callers granting authority need the creation-ordered snapshot.
+  if (process.platform !== "win32" || !options.requireVerifiedParent) {
+    pids.add(immediateParent);
+  }
+  if (process.platform === "win32") {
+    for (const pid of readWindowsProcessAncestorsSync(
+      process.pid,
+      MAX_ANCESTOR_WALK_DEPTH,
+      spawnTimeoutMs,
+    )) {
+      pids.add(pid);
+    }
+    return pids;
+  }
   const readTransitiveParent =
     process.platform === "linux"
       ? readParentPidFromProc
@@ -209,8 +225,7 @@ function getExcludedGatewayPidsSync(spawnTimeoutMs: number, protectedPid?: numbe
  * `MAX_ANCESTOR_WALK_DEPTH` entries from `/proc/<pid>/status`; each read is
  * a virtual-filesystem access (no disk I/O, no external process), wrapped
  * in try/catch and degrades silently. On macOS the lookup shells out to `ps`
- * with the process-inspection timeout. Windows only uses the in-memory direct
- * parent from `process.ppid`.
+ * with the process-inspection timeout.
  */
 function parseLsofEntries(stdout: string): Array<{ pid: number; cmd?: string }> {
   const entries: Array<{ pid: number; cmd?: string }> = [];
@@ -334,6 +349,8 @@ function filterVerifiedWindowsGatewayPidsResult(
 }
 
 type CleanStaleGatewayProcessesOptions = {
+  /** Reassert effect authority after blocking probes and before every signal. */
+  assertCurrent?: () => void;
   protectedPid?: number;
   // Resolve only after listener enumeration so supervisor respawns captured by
   // that snapshot cannot be mistaken for stale processes. Throw to skip cleanup.
@@ -518,12 +535,13 @@ function pollPortOnceWindows(port: number): PollResult {
  * On Unix: sends SIGTERM, waits briefly, then SIGKILL for survivors.
  * On Windows: uses taskkill (graceful first, then /F for force-kill).
  */
-function terminateStaleProcessesSync(pids: number[]): number[] {
+function terminateStaleProcessesSync(pids: number[], assertCurrent?: () => void): number[] {
   if (process.platform === "win32") {
-    return terminateStaleProcessesWindows(pids);
+    return terminateStaleProcessesWindows(pids, assertCurrent);
   }
   const killed: number[] = [];
   for (const pid of pids) {
+    assertCurrent?.();
     if (trySignalStaleProcess(pid, "SIGTERM")) {
       killed.push(pid);
     }
@@ -534,6 +552,7 @@ function terminateStaleProcessesSync(pids: number[]): number[] {
   sleepSync(STALE_SIGTERM_WAIT_MS);
   for (const pid of killed) {
     if (isProcessAlive(pid)) {
+      assertCurrent?.();
       trySignalStaleProcess(pid, "SIGKILL");
     }
   }
@@ -559,7 +578,7 @@ function trySignalStaleProcess(pid: number, signal: NodeJS.Signals): boolean {
  * Windows-specific process termination using taskkill.
  * Sends a graceful taskkill first (/T for tree), waits, then escalates to /F.
  */
-function terminateStaleProcessesWindows(pids: number[]): number[] {
+function terminateStaleProcessesWindows(pids: number[], assertCurrent?: () => void): number[] {
   const taskkillPath = path.win32.join(
     getWindowsInstallRoots().systemRoot,
     "System32",
@@ -567,6 +586,7 @@ function terminateStaleProcessesWindows(pids: number[]): number[] {
   );
   const killed: number[] = [];
   for (const pid of pids) {
+    assertCurrent?.();
     const graceful = spawnSync(taskkillPath, ["/T", "/PID", String(pid)], {
       stdio: "ignore",
       timeout: 5000,
@@ -582,6 +602,7 @@ function terminateStaleProcessesWindows(pids: number[]): number[] {
       killed.push(pid);
       continue;
     }
+    assertCurrent?.();
     const forced = spawnSync(taskkillPath, ["/F", "/T", "/PID", String(pid)], {
       stdio: "ignore",
       timeout: 5000,
@@ -682,7 +703,7 @@ export function cleanStaleGatewayProcessesSync(
     restartLog.warn(
       `killing ${stalePids.length} stale gateway process(es) before restart: ${stalePids.join(", ")}`,
     );
-    const killed = terminateStaleProcessesSync(stalePids);
+    const killed = terminateStaleProcessesSync(stalePids, options?.assertCurrent);
     // Wait for the port to be released before returning — called unconditionally
     // even when `killed` is empty (all pids were already dead before SIGTERM).
     // A process can exit before our signal arrives yet still leave its socket

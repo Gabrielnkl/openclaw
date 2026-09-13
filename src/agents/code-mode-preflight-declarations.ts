@@ -13,12 +13,20 @@ declare function clearTimeout(id: number): void;
 declare const console: { log(...values: unknown[]): void; info(...values: unknown[]): void; warn(...values: unknown[]): void; error(...values: unknown[]): void; debug(...values: unknown[]): void };
 declare class TextEncoder { readonly encoding: string; encode(input?: string): Uint8Array; encodeInto(input: string, destination: Uint8Array): { read: number; written: number }; }
 declare class TextDecoder { constructor(label?: string, options?: {fatal?: boolean; ignoreBOM?: boolean}); decode(input?: ArrayBuffer | ArrayBufferView, options?: {stream?: boolean}): string; readonly encoding: string; readonly fatal: boolean; readonly ignoreBOM: boolean; }
-type CodeModeHandle = ((input?: unknown) => Promise<unknown>) & { callableName: string; toolName: string; description: string; describe(): Promise<unknown> };
+type CodeModeHandle = ((input?: unknown) => Promise<unknown>) & { callableName: string; toolName: string; description: string; describe(): Promise<unknown> } & ({source: "mcp"; apiPath: string} | {source: "openclaw" | "client"; apiPath?: undefined});
 declare const catalog: { search(query: string, options?: {limit?: number}): Promise<readonly CodeModeHandle[]>; all(): readonly CodeModeHandle[] };
 type CodeModeApiFile = {path: string; description?: string; bytes: number; content: string};
 declare const API: { list(prefix?: string): Promise<{files: Array<{path: string; description?: string; bytes?: number}>}>; read(path: string): Promise<CodeModeApiFile> };
 declare const skills: { list(): Promise<unknown>; read(name: string): Promise<string> };
-declare const nodes: unknown;
+declare const nodes: {
+  list(): Promise<Array<{ id: string; name: string; platform?: string; connected: boolean; commands: string[] }>>;
+  get(idOrName: string): Promise<{
+    readonly id: string;
+    readonly name: string;
+    readonly invoke: (command: string, params?: unknown) => Promise<unknown>;
+    readonly listDir?: (path: string) => Promise<unknown>;
+  }>;
+};
 declare const namespaces: unknown;
 `;
 

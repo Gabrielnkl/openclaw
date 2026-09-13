@@ -4,7 +4,7 @@ import type { ChatFollowUpMode } from "../../../app/settings.ts";
 import { icons } from "../../../components/icons.ts";
 import { syncDropdownItemRadio } from "../../../components/web-awesome.ts";
 import { t } from "../../../i18n/index.ts";
-import { isChatControlCommand } from "../../../lib/chat/commands.ts";
+import { canSubmitBeforeChatHistory } from "../../../lib/chat/commands.ts";
 import type { ControlUiFollowUpMode } from "../../../lib/chat/follow-up-mode.ts";
 import type { ComposerDictationController } from "../composer-dictation.ts";
 import type { ComposerTalkCapabilityStatus } from "../composer-microphone-picker.ts";
@@ -25,9 +25,11 @@ export type ChatRunControlsProps = {
   canAbort: boolean;
   canSend: boolean;
   submitDisabledReason?: string | null;
+  submitPending?: boolean;
   connected: boolean;
   draft: string;
   hasAttachments?: boolean;
+  preparingAttachments?: boolean;
   isBusy: boolean;
   followUpMode?: ControlUiFollowUpMode;
   alternateFollowUpMode?: ChatFollowUpMode;
@@ -579,8 +581,8 @@ export function renderChatPrimaryActions(props: ChatRunControlsProps) {
         `
       : nothing;
   const sendDisabledReason =
-    props.canSend && isChatControlCommand(props.draft) ? null : props.submitDisabledReason;
-  const sendBusy = props.sending || Boolean(sendDisabledReason);
+    props.canSend && canSubmitBeforeChatHistory(props.draft) ? null : props.submitDisabledReason;
+  const sendBusy = props.sending || Boolean(sendDisabledReason && props.submitPending);
   const sendStatus =
     sendDisabledReason ??
     (props.sending
@@ -592,14 +594,16 @@ export function renderChatPrimaryActions(props: ChatRunControlsProps) {
   // same slot shows stop while empty, then becomes the follow-up action as soon
   // as the operator composes content; two competing primary buttons never render.
   const sendAction = html`
-    <openclaw-tooltip .content=${sendStatus ?? activeRunActionTooltip}>
+    <openclaw-tooltip
+      .content=${props.preparingAttachments ? t("chat.composer.preparingAttachments") : (sendStatus ?? activeRunActionTooltip)}
+    >
       <button
         class="chat-send-btn chat-send-btn--send${props.sending ? " chat-send-btn--sending" : ""}"
         @pointerdown=${props.onPrimaryActionPointerDown}
         @click=${send}
-        ?disabled=${!props.canSend || sendBusy || !hasComposedContent}
+        ?disabled=${!props.canSend || props.sending || Boolean(sendDisabledReason) || !hasComposedContent}
         aria-label=${sendStatus ?? activeRunActionDescription}
-        aria-busy=${sendBusy ? "true" : "false"}
+        aria-busy=${sendBusy || props.preparingAttachments ? "true" : "false"}
       >
         ${sendBusy ? html`<span class="btn__spinner" aria-hidden="true"></span>` : icons.arrowUp}
         <span class="agent-chat__control-label">${activeRunActionLabel}</span>
@@ -607,7 +611,7 @@ export function renderChatPrimaryActions(props: ChatRunControlsProps) {
     </openclaw-tooltip>
   `;
   const dictationSendAction =
-    props.dictation && !props.submitDisabledReason
+    props.dictation && (!props.submitDisabledReason || canSubmitBeforeChatHistory(props.draft))
       ? renderComposerDictationSendAction(
           props.dictation,
           () => props.onSend(),

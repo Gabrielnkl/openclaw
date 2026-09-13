@@ -17,6 +17,7 @@ import {
 import { buildSystemdUnit, parseSystemdExecStart } from "../../daemon/systemd-unit.js";
 import { makeTempWorkspace } from "../../test-helpers/workspace.js";
 import { captureEnv, withEnvAsync } from "../../test-utils/env.js";
+import { resolveTestNodeExecPath } from "../../test-utils/node-process.js";
 import { createCliRuntimeCapture } from "../test-runtime-capture.js";
 
 const { runtimeLogs, runtimeErrors, defaultRuntime, resetRuntimeCapture } =
@@ -178,7 +179,15 @@ describe("runDaemonInstall integration", () => {
   )(
     "repairs $condition Node in the $platform definition (force=$force)",
     async ({ platform, force, condition }) => {
+      const execPathDescriptor = Object.getOwnPropertyDescriptor(process, "execPath")!;
+      const testNodeExecPath = resolveTestNodeExecPath();
       vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+      if (process.versions.bun) {
+        Object.defineProperty(process, "execPath", {
+          value: testNodeExecPath,
+          configurable: true,
+        });
+      }
       const entry = path.join(tempHome, "dist", "index.js");
       await fs.mkdir(path.dirname(entry), { recursive: true });
       await fs.writeFile(entry, "");
@@ -271,7 +280,7 @@ describe("runDaemonInstall integration", () => {
         if (!nodePath) {
           throw new Error("Missing repaired runtime");
         }
-        expect(await fs.realpath(nodePath)).toBe(await fs.realpath(process.execPath));
+        expect(await fs.realpath(nodePath)).toBe(await fs.realpath(testNodeExecPath));
         expect(repaired?.programArguments).toContain(entry);
         expect(await fs.readFile(definitionPath, "utf8")).not.toContain(oldNode);
         expect(runtimeLogs.join("\n")).toContain(
@@ -286,6 +295,9 @@ describe("runDaemonInstall integration", () => {
         }
       } finally {
         process.argv = originalArgv;
+        if (process.versions.bun) {
+          Object.defineProperty(process, "execPath", execPathDescriptor);
+        }
       }
     },
   );
@@ -433,6 +445,28 @@ describe("runDaemonInstall integration", () => {
       }
     },
   );
+
+  it("names an unreadable Linux unit without changing config or replacing it", async () => {
+    const unit = path.join(accountHome, ".config/systemd/user/openclaw-gateway.service");
+    const readFile = fs.readFile.bind(fs);
+    vi.spyOn(fs, "readFile").mockImplementation(async (...args) => {
+      if (args[0] === unit) {
+        throw Object.assign(new Error("private-native-error-canary"), { code: "EACCES" });
+      }
+      return readFile(...args);
+    });
+    serviceMock.readCommand.mockImplementation(readSystemdServiceExecStart);
+    serviceMock.isLoaded.mockRejectedValue(new Error("Failed to get unit file state"));
+    const before = await snapshotConfig();
+    await expect(runDaemonInstall({ json: true, force: true })).rejects.toThrow("__exit__:1");
+    const output = runtimeLogs.join("\n");
+    expect(output).toContain(JSON.stringify(unit).slice(1, -1));
+    expect(output).toContain("unreadable");
+    expect(output).not.toContain("private-native-error-canary");
+    expect(await snapshotConfig()).toEqual(before);
+    expect(serviceMock.install).not.toHaveBeenCalled();
+    expect(serviceMock.isLoaded).not.toHaveBeenCalled();
+  });
 
   it.each(["fragment", "drop-in"])(
     "blocks a root-owned manager %s before config or token writes",
@@ -999,7 +1033,7 @@ describe("runDaemonInstall integration", () => {
         if (testCase.name === "operator heap cap") {
           const measure = (flags: string[]) => {
             const child = spawnSync(
-              process.execPath,
+              resolveTestNodeExecPath(),
               [
                 ...flags,
                 "-e",

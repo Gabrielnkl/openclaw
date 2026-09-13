@@ -2,6 +2,11 @@ import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { resolveStateDir } from "../../config/paths.js";
 import { isContainerEnvironment } from "../../infra/container-environment.js";
 import type { UpdateRunResult } from "../../infra/update-runner.js";
+import {
+  formatUpdateActivationTimeoutGuidance,
+  UPDATE_ACTIVATION_TIMEOUT_REASON,
+  UPDATE_INSTALL_SKIP_GUIDANCE,
+} from "../../shared/update-outcome.js";
 import { formatCliCommand } from "../command-format.js";
 
 type UnsafeUpdateRecovery = Extract<
@@ -30,7 +35,17 @@ export function resolveUpdateResultNextAction(params: {
   env: NodeJS.ProcessEnv;
 }): string | undefined {
   const { result, env } = params;
+  if (
+    result.status === "skipped" &&
+    result.reason &&
+    Object.hasOwn(UPDATE_INSTALL_SKIP_GUIDANCE, result.reason)
+  ) {
+    return UPDATE_INSTALL_SKIP_GUIDANCE[result.reason];
+  }
   if (result.status === "error") {
+    if (result.reason === UPDATE_ACTIVATION_TIMEOUT_REASON) {
+      return formatUpdateActivationTimeoutGuidance((command) => formatCliCommand(command, env));
+    }
     if (result.reason === "rollback-project-changed") {
       return `Other global packages changed after staging; automatic rollback was refused to preserve them. Keep the candidate installed if its gateway is reachable; otherwise keep the gateway stopped. ${resolveUnsafeUpdateRecoveryGuidance(undefined, env)}`;
     }

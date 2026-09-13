@@ -50,10 +50,22 @@ For `api.registerTool(...)` or a factory tool, put the same `outputSchema`
 property on the returned `AnyAgentTool` object.
 
 Current built-in contracts include `agents_list`, `agents_wait`, `apply_patch`,
-`conversations_list`, `conversations_send`, `conversations_turn`, `edit`,
-`openclaw`, `read`, `screen`,
+`automations`, `conversations_list`, `conversations_send`, `conversations_turn`, `edit`,
+`openclaw`, `process`, `read`, `screen`,
 `sessions_history`, `sessions_list`, `sessions_search`, `sessions_send`,
 `session_status`, `suggest_task`, `terminal`, `web_fetch`, and `web_search`.
+`automations` declares scheduler status, paginated job summaries, full jobs,
+run history, and action outcomes. A successful removal can include
+`sessionCleanup: "pending"` when an active run still owns its session. The job is
+already removed; session cleanup follows when that run ends.
+`process` declares session listings, poll and
+log output, input acknowledgments, and failures. Read their declarations through
+`API.read("tools/automations.d.ts")` or `API.read("tools/process.d.ts")` before
+composing results. Check the returned union before selecting action-specific
+fields, for example `"sessions" in result` for a process listing or
+`"jobs" in result && "nextOffset" in result` for an automations page. Scheduler
+status also has a numeric `jobs` count.
+
 Exact passthroughs can reuse their owning protocol schema instead of
 duplicating a model-only contract. For example, the conversation tools expose
 the same Gateway result schemas used by `conversations.list`,
@@ -124,11 +136,12 @@ The contract rules are strict:
 See [Tool plugins](/plugins/tool-plugins#output-contracts) for plugin authoring
 details.
 
-MCP catalog entries are not exposed as bare globals or through generic
-`catalog` discovery; they are available only through the generated `MCP`
-namespace. TypeScript-style declaration files
-are available through the read-only `API` virtual file surface, so agents can
-inspect MCP signatures without adding MCP schemas to the prompt:
+MCP catalog entries stay under the generated `MCP` namespace. Task-oriented
+`catalog.search(...)` also returns MCP handles that invoke the same namespace
+path and identify its declaration file. MCP entries remain absent from bare
+globals, `catalog.all()`, and the trusted quick index. TypeScript-style declaration
+files are available through the read-only `API` virtual file surface, so agents
+can inspect MCP signatures without adding MCP schemas to the prompt:
 
 ```typescript
 const files = await API.list("mcp");
@@ -283,6 +296,13 @@ reduce the search scope, paginate, select fewer files, or return a smaller
 projection. Non-serializable values are converted to plain strings or errors;
 binary values are not supported. Images and files travel through ordinary
 OpenClaw tools, not through the code-mode bridge.
+
+When later cells need the full data, return `await results.save(value)` instead
+of emitting the value. The bounded reference preview is separate from the
+complete saved JSON; `results.load(id)` lets later code select a smaller
+projection without refetching. See
+[Reuse data across cells](/tools/code-mode/quickstart#reuse-data-across-cells)
+for limits and the agent-run lifetime.
 
 Marker prefixes and omitted-byte counts describe the original compact JSON after
 normalization, including array brackets, separators, and JSON escaping. Ordinary

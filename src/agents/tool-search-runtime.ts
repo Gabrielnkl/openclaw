@@ -1,5 +1,6 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { getPluginToolMeta } from "../plugins/tool-metadata.js";
+import { sortAndLimitBy } from "../shared/sort-and-limit.js";
 import { resolveAgentToolExecutionSchema } from "./agent-tool-availability.js";
 import {
   finalizeToolTerminalPresentation,
@@ -8,6 +9,7 @@ import {
 } from "./agent-tools.before-tool-call.js";
 import { runWithToolExecutionValidation } from "./agent-tools.execution-validation.js";
 import { getChannelAgentToolMeta } from "./channel-tool-metadata.js";
+import { captureAgentPluginRuntimeRefresh } from "./plugin-runtime-refresh.js";
 import type { AgentToolResult } from "./runtime/index.js";
 import { bindJoinedCollectorInvocation } from "./subagents/swarm/swarm-collector-capability.js";
 import { markToolContractFailure } from "./tool-contract-error.js";
@@ -353,6 +355,7 @@ function sanitizeToolCallIdPart(value: string): string {
 }
 
 export class ToolSearchRuntime {
+  private readonly pluginRuntimeRefresh = captureAgentPluginRuntimeRefresh();
   private callSequence = 0;
   private readonly terminalTargetBatchByParent = new Map<string, boolean>();
   private readonly networkInvocations = new Map<string, { active: number; observed: boolean }>();
@@ -372,10 +375,14 @@ export class ToolSearchRuntime {
     // A query that is exactly a tool name or id is a request for that tool, not
     // a description of one. BM25 alone can rank a shorter entry that merely
     // mentions the word above it, and the limit then drops the tool asked for.
-    const exact = query.trim().toLowerCase();
-    const isExact = (entry: ToolSearchCatalogEntry) =>
-      entry.name.toLowerCase() === exact || entry.id.toLowerCase() === exact;
-    const exactMatches = entries.filter(isExact);
+    const spelling = query.trim();
+    const exact = spelling.toLowerCase();
+    const exactIdEntry = entries.find((entry) => entry.id === spelling);
+    const exactMatches = exactIdEntry
+      ? [exactIdEntry]
+      : entries.filter(
+          (entry) => entry.name.toLowerCase() === exact || entry.id.toLowerCase() === exact,
+        );
     // An unambiguous exact lookup never needs schema traversal or a BM25 index.
     if (limit === 1 && exactMatches.length === 1) {
       return exactMatches.slice(0, limit).map((entry) => compactToolSearchCatalogEntry(entry));
@@ -409,19 +416,25 @@ export class ToolSearchRuntime {
       };
       catalogIndexes.set(indexKey, cachedIndex);
     }
-    const ranked = scoreLexical(cachedIndex.index, tokenizeQuery(query))
-      .toSorted(
-        (a, b) =>
-          Number(isExact(b.value)) - Number(isExact(a.value)) ||
-          Number(b.matchedLiteral) - Number(a.matchedLiteral) ||
-          b.score - a.score ||
-          a.value.id.localeCompare(b.value.id),
-      )
-      .map((hit) => hit.value);
+    const hits = scoreLexical(cachedIndex.index, tokenizeQuery(query));
+    const exactMatchSet = new Set(exactMatches);
     // A tool whose name is a stopword ("do") tokenizes to nothing and so never
     // reaches the ranking at all. Naming it exactly is still an unambiguous
     // request for it, which the previous scorer honored.
-    const exactEntries = exactMatches.filter((entry) => !ranked.includes(entry));
+    const exactEntries = exactMatches.filter((entry) => !hits.some((hit) => hit.value === entry));
+    const remaining = limit - exactEntries.length;
+    const ranked =
+      remaining > 0
+        ? sortAndLimitBy(
+            hits,
+            remaining,
+            (a, b) =>
+              Number(exactMatchSet.has(b.value)) - Number(exactMatchSet.has(a.value)) ||
+              Number(b.matchedLiteral) - Number(a.matchedLiteral) ||
+              b.score - a.score ||
+              a.value.id.localeCompare(b.value.id),
+          ).map((hit) => hit.value)
+        : [];
     return [...exactEntries, ...ranked]
       .slice(0, limit)
       .map((entry) => compactToolSearchCatalogEntry(entry));
@@ -478,6 +491,12 @@ export class ToolSearchRuntime {
 
   callValue = async (id: string, input?: unknown, options?: ToolSearchCallOptions) =>
     unwrapToolResultValue((await this.call(id, input, options)).result);
+
+  observeNetworkContent(parentToolCallId: string): void {
+    const state = this.networkInvocations.get(parentToolCallId) ?? { active: 0, observed: false };
+    state.observed = true;
+    this.networkInvocations.set(parentToolCallId, state);
+  }
 
   hasNetworkContent(parentToolCallId?: string): boolean {
     return parentToolCallId
@@ -540,6 +559,7 @@ export class ToolSearchRuntime {
       onUpdate?: ToolSearchCallOptions["onUpdate"];
     },
   ) => {
+    this.pluginRuntimeRefresh.assertCurrent();
     catalog.callCount += 1;
     const normalizedInput = input ?? {};
     const parentId = sanitizeToolCallIdPart(options?.parentToolCallId ?? "direct");
@@ -578,6 +598,7 @@ export class ToolSearchRuntime {
     const validateInput = this.options.validateInput && entry.source === "openclaw";
     const executionTool = prepareToolSearchCatalogExecutionTool(entry, this.options);
     const runExecution = async () => {
+      this.pluginRuntimeRefresh.assertCurrent();
       const parentToolCallId = options?.parentToolCallId ?? toolCallId;
       const signal = options?.signal ?? this.ctx.abortSignal;
       const networkInvocation =

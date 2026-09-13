@@ -15,6 +15,7 @@ import { insertComposerDictation } from "../composer-dictation.ts";
 import {
   handleChatAttachmentPaste,
   renderAttachmentPreview,
+  renderAttachmentReadStatus,
   renderChatAttachmentInputs,
 } from "./chat-attachments.ts";
 import type { ChatRunControlsProps } from "./chat-composer-controls.ts";
@@ -293,6 +294,7 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
     : nothing;
   const queue = renderChatQueue({
     queue: props.queue,
+    displayQueue: props.displayQueue,
     offline: props.offline,
     canAbort: showAbortableUi,
     onQueueRetry:
@@ -386,6 +388,7 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
               }
               <div class="agent-chat__composer-lede">
                 ${goalComposer.render()} ${renderAttachmentPreview(props)}
+                ${renderAttachmentReadStatus(props.getPendingAttachmentReads?.() ?? props.pendingAttachmentReads ?? 0)}
                 ${renderSelectedHumanMentions(visibleDraft, props.mentions, () => {
                   commitComposerDraft(props, props.getDraft?.() ?? props.draft, []);
                   requestUpdate();

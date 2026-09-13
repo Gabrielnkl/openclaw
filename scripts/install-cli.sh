@@ -21,6 +21,11 @@ fi
 
 set -euo pipefail
 
+# BEGIN GENERATED UPDATE NETWORK BUDGET
+# Source: src/infra/update-network-budget.ts; regenerate: node scripts/generate-update-network-budget.mjs
+UPDATE_NETWORK_TIMEOUT_SECONDS=300
+# END GENERATED UPDATE NETWORK BUDGET
+
 # The re-executed shell has the script open, so unlink its private copy now.
 if [[ -n "${OPENCLAW_INSTALLER_REEXEC_FILE:-}" && "${BASH_SOURCE[0]:-}" == "$OPENCLAW_INSTALLER_REEXEC_FILE" ]]; then
   rm -f -- "$OPENCLAW_INSTALLER_REEXEC_FILE"
@@ -176,12 +181,12 @@ download_file() {
   if [[ "$DOWNLOADER" == "curl" ]]; then
     # Bound post-connect stalls without imposing a total download duration.
     curl -fsSL --proto '=https' --tlsv1.2 \
-      --speed-limit 1 --speed-time 30 \
+      --speed-limit 1 --speed-time "$UPDATE_NETWORK_TIMEOUT_SECONDS" \
       --retry 3 --retry-delay 1 --retry-connrefused \
       -o "$output" "$url"
     return
   fi
-  wget -q --https-only --secure-protocol=TLSv1_2 --tries=3 --timeout=20 -O "$output" "$url"
+  wget -q --https-only --secure-protocol=TLSv1_2 --tries=3 --timeout="$UPDATE_NETWORK_TIMEOUT_SECONDS" -O "$output" "$url"
 }
 
 cleanup_legacy_submodules() {
@@ -272,6 +277,23 @@ fail() {
   emit_json error message "$msg"
   log "ERROR: $msg"
   exit 1
+}
+
+prepare_tmpdir() {
+  local base tmp fallback=0
+  base="$(resolve_installer_path "${TMPDIR:-/tmp}")"
+  if ! tmp="$(mktemp -d "${base%/}/openclaw-install.XXXXXX" 2>/dev/null)"; then
+    if ! tmp="$(mktemp -d /tmp/openclaw-install.XXXXXX 2>/dev/null)"; then
+      fail "Cannot create a temporary directory. Check permissions for TMPDIR and /tmp, then retry setup."
+    fi
+    fallback=1
+  fi
+  TMPFILES+=("$tmp")
+  export TMPDIR="$tmp"
+  if [[ "$fallback" -eq 1 ]]; then
+    emit_json step name temporary-directory status warn reason using-fallback
+    log "Using a private directory under /tmp because TMPDIR is unavailable."
+  fi
 }
 
 require_bin() {
@@ -1169,7 +1191,8 @@ install_node() {
   log "Installing Node ${NODE_VERSION} (user-space)..."
 
   mkdir -p "${PREFIX}/tools"
-  tmp="$(mktemp -d)"
+  # Darwin's default mktemp location can ignore TMPDIR; use the prepared path explicitly.
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/openclaw-node.XXXXXX")"
   TMPFILES+=("$tmp")
   base_url="https://nodejs.org/dist/v${NODE_VERSION}"
   tarball="node-v${NODE_VERSION}-${os}-${arch}.tar.gz"
@@ -1519,7 +1542,7 @@ ensure_pnpm_git_prepare_allowlist() {
   local tmp
 
   if [[ -f "$workspace_file" ]] && ! grep -Fq "\"${dep}\"" "$workspace_file" && ! grep -Fq "${dep}:" "$workspace_file" && ! grep -Fq -- "- ${dep}" "$workspace_file"; then
-    tmp="$(mktemp)"
+    tmp="$(mktemp "${TMPDIR:-/tmp}/openclaw-workspace.XXXXXX")"
     TMPFILES+=("$tmp")
     if grep -q '^allowBuilds:[[:space:]]*$' "$workspace_file"; then
       awk -v dep="$dep" '
@@ -1815,6 +1838,9 @@ refresh_gateway_service_if_loaded() {
 main() {
   parse_args "$@"
   PREFIX="$(resolve_installer_path "$PREFIX")"
+  local original_tmpdir="${TMPDIR-}" original_tmpdir_set="${TMPDIR+x}"
+  local TMPDIR="$original_tmpdir"
+  prepare_tmpdir
   if [[ "$NODE_ONLY" -eq 1 ]]; then
     if is_musl_linux; then
       fail "Private Node.js recovery is unavailable on musl Linux; update Node.js with your system package manager."
@@ -1856,6 +1882,12 @@ main() {
   fi
   commit_wrapper_backup
 
+  # Services and onboarding outlive staging; never persist its temporary path.
+  if [[ "$original_tmpdir_set" == x ]]; then
+    export TMPDIR="$original_tmpdir"
+  else
+    unset TMPDIR
+  fi
   refresh_gateway_service_if_loaded
   emit_json "done" version "$installed_version"
   log "OpenClaw installed (${installed_version})."

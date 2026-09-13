@@ -1246,6 +1246,8 @@ describe("createTelegramBot", () => {
           expect(replySpy).not.toHaveBeenCalled();
           await vi.advanceTimersByTimeAsync(1);
         }
+        // Timer expiry starts the flush; its source participants own completion.
+        await Promise.all(sourceWork);
         expect(replySpy.mock.calls.map(([ctx]) => ctx.RawBody)).toEqual(
           debounceMs === 0
             ? ["first short message", "second short message"]
@@ -1254,7 +1256,6 @@ describe("createTelegramBot", () => {
         expect(replySpy.mock.calls.map(([ctx]) => ctx.MessageSid)).toEqual(
           debounceMs === 0 ? ["501", "502"] : ["502"],
         );
-        await Promise.all(sourceWork);
       } finally {
         await vi.advanceTimersByTimeAsync(10_000);
         await Promise.all(sourceWork);
@@ -1296,9 +1297,9 @@ describe("createTelegramBot", () => {
       await vi.advanceTimersByTimeAsync(899);
       expect(replySpy).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
+      await expect(firstParticipant.task).resolves.toEqual({ kind: "completed" });
       expect(replySpy.mock.calls.map(([ctx]) => ctx.RawBody)).toEqual(["before delay change"]);
       expect(replySpy.mock.calls.map(([ctx]) => ctx.MessageSid)).toEqual(["511"]);
-      await expect(firstParticipant.task).resolves.toEqual({ kind: "completed" });
 
       const second = await dispatchSpooledPrivateText(messageHandler, {
         updateId: 512,
@@ -1324,16 +1325,16 @@ describe("createTelegramBot", () => {
       await vi.advanceTimersByTimeAsync(1499);
       expect(replySpy.mock.calls.map(([ctx]) => ctx.RawBody)).toEqual(["before delay change"]);
       await vi.advanceTimersByTimeAsync(1);
-      expect(replySpy.mock.calls.map(([ctx]) => ctx.RawBody)).toEqual([
-        "before delay change",
-        "new batch\nextends batch",
-      ]);
-      expect(replySpy.mock.calls.map(([ctx]) => ctx.MessageSid)).toEqual(["511", "513"]);
       await expect(Promise.all(sourceWork)).resolves.toEqual([
         { kind: "completed" },
         { kind: "completed" },
         { kind: "completed" },
       ]);
+      expect(replySpy.mock.calls.map(([ctx]) => ctx.RawBody)).toEqual([
+        "before delay change",
+        "new batch\nextends batch",
+      ]);
+      expect(replySpy.mock.calls.map(([ctx]) => ctx.MessageSid)).toEqual(["511", "513"]);
     } finally {
       await vi.advanceTimersByTimeAsync(3000);
       await Promise.all(sourceWork);
@@ -3047,7 +3048,7 @@ describe("createTelegramBot", () => {
     expect(replySpy).not.toHaveBeenCalled();
     expect(sendMessageSpy).toHaveBeenCalledWith(
       1234,
-      "Only a configured OpenClaw owner/admin can start provider login from this channel.",
+      "Only an OpenClaw owner can sign in here. Ask the owner to connect this provider or grant you owner access.",
       {},
     );
   });
@@ -6508,6 +6509,67 @@ describe("createTelegramBot", () => {
       callback_data: "mdl_list_openai_1",
     });
   });
+
+  it.each(["mdl_prov", "mdl_list_xai_1"])(
+    "explains missing access in %s callbacks",
+    async (data) => {
+      loadConfig.mockReturnValue({
+        agents: { defaults: { model: "xai/grok-test" } },
+        channels: { telegram: { dmPolicy: "open", allowFrom: ["*"] } },
+      });
+      setSessionStoreEntriesForTest({
+        "agent:main:main": {
+          sessionId: "pinned-model-account",
+          updatedAt: 0,
+          authProfileOverride: "xai:missing",
+          authProfileOverrideSource: "user",
+        },
+      });
+      vi.mocked(telegramBotDepsForTest.buildModelsProviderData).mockImplementationOnce(
+        async (_cfg, _agentId, options) => {
+          const missingAccess = options?.sessionEntry?.authProfileOverride === "xai:missing";
+          return {
+            byProvider: new Map([["xai", new Set(["grok-test"])]]),
+            providers: ["xai"],
+            resolvedDefault: { provider: "xai", model: "grok-test" },
+            modelNames: new Map([["xai/grok-test", "Grok Test"]]),
+            modelCatalog: [{ provider: "xai", id: "grok-test", name: "Grok Test" }],
+            modelMenu: {
+              modelNames: new Map([
+                ["xai/grok-test", missingAccess ? "Sign-in needed — Grok Test" : "Grok Test"],
+              ]),
+              byProvider: new Map([
+                [
+                  "xai",
+                  {
+                    available: missingAccess ? 0 : 1,
+                    notice: missingAccess ? "xai: Sign-in needed. Connect with /login xai." : "",
+                  },
+                ],
+              ]),
+            },
+          };
+        },
+      );
+      createTelegramBot({ token: "tok" });
+      await getCallbackHandler()(
+        makeCallbackRetryContext({ id: `missing-access-${data}`, data, messageId: 24 }),
+      );
+
+      expect(editMessageTextSpy.mock.calls.at(-1)?.[2]).toContain("Connect with /login xai.");
+      if (data === "mdl_list_xai_1") {
+        expect(editMessageTextSpy.mock.calls.at(-1)?.[2]).toContain("0 of 1 available");
+        expect(editMessageTextSpy.mock.calls.at(-1)?.[3]).toMatchObject({
+          reply_markup: {
+            inline_keyboard: expect.arrayContaining([
+              [expect.objectContaining({ text: expect.stringContaining("Sign-in needed") })],
+            ]),
+          },
+        });
+      }
+      expect(replySpy).not.toHaveBeenCalled();
+    },
+  );
 
   it("retries model selection callbacks after a bubbled session-store failure", async () => {
     createTelegramBot({ token: "tok" });
