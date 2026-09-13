@@ -300,6 +300,8 @@ describe("accepted input custody", () => {
         }),
       );
 
+    // Post-commit observer failures are isolated and warn-logged; the
+    // committed relocation still succeeds.
     expect(() =>
       runOpenClawAgentWriteTransaction(
         (current) => {
@@ -310,7 +312,7 @@ describe("accepted input custody", () => {
         },
         toDatabaseOptions(resolveSqliteScope(scope())),
       ),
-    ).toThrow("injected observer failure");
+    ).not.toThrow();
 
     expect(() =>
       receipt.run(() => appendCopy(receipt.inputId, "stale-source-after-observer")),
