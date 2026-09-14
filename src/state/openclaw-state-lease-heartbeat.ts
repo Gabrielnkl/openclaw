@@ -69,6 +69,19 @@ export function startOpenClawStateLeaseHeartbeat(
     throw error;
   }
   let handleReleaseError: Error | undefined;
+  const ready = createDeferredCore();
+  let failed = false;
+  const fail = (error: Error) => {
+    if (failed || Atomics.load(shared, state.status) === state.closed) {
+      return;
+    }
+    failed = true;
+    Atomics.store(shared, state.status, state.lost);
+    Atomics.notify(shared, state.ack);
+    clearTimeout(startTimer);
+    ready.reject(error);
+    params.onLost(error);
+  };
   worker.once("exit", () => {
     try {
       release();
@@ -76,24 +89,13 @@ export function startOpenClawStateLeaseHeartbeat(
       handleReleaseError = new Error("state lease heartbeat handle release failed", {
         cause: error,
       });
-      params.onLost(handleReleaseError);
+      fail(handleReleaseError);
     }
   });
   // Worker stdio uses parent message delivery, which maintenance can block.
   // The heartbeat emits no normal output; drain runtime bootstrap diagnostics.
   worker.stdout.resume();
   worker.stderr.resume();
-  const ready = createDeferredCore();
-  const fail = (error: Error) => {
-    if (Atomics.load(shared, state.status) === state.closed) {
-      return;
-    }
-    Atomics.store(shared, state.status, state.lost);
-    Atomics.notify(shared, state.ack);
-    clearTimeout(startTimer);
-    ready.reject(error);
-    params.onLost(error);
-  };
   const settleStartup = (trigger: "timeout" | "message") => {
     clearTimeout(startTimer);
     // Readiness precedes notification delivery. A delayed parent must not

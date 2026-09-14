@@ -41,6 +41,40 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("state lease heartbeat fail idempotency", () => {
+  it("calls onLost at most once when the worker errors then exits after becoming ready", async () => {
+    const onLost = vi.fn();
+    const heartbeat = startOpenClawStateLeaseHeartbeat({
+      path: "/synthetic-private-state/lease.sqlite",
+      identity: {
+        scope: "synthetic-private-scope",
+        key: "synthetic-private-key",
+        owner: "synthetic-owner-token",
+      },
+      leaseMs: 60_000,
+      heartbeatMs: 20_000,
+      expiresAt: Date.now() + 60_000,
+      onLost,
+    });
+    const outcome = heartbeat.ready.catch((error: unknown) => error);
+    const worker = workers[0];
+    try {
+      assert(worker, "Expected the heartbeat worker to be constructed");
+      Atomics.store(worker.shared, state.status, state.ready);
+      worker.emit("message", null);
+      const error = await outcome;
+      expect(error).toBeUndefined();
+      const testError = new Error("test worker error");
+      worker.emit("error", testError);
+      worker.emit("exit", 1);
+      expect(onLost).toHaveBeenCalledTimes(1);
+      expect(onLost).toHaveBeenCalledWith(testError);
+    } finally {
+      await heartbeat.stop();
+    }
+  });
+});
+
 describe("state lease heartbeat startup diagnostics", () => {
   it.each([
     { status: "starting", trigger: "timeout", remainingMs: 60_000, elapsedMs: 5_000 },
