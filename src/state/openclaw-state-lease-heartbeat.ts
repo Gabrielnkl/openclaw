@@ -68,14 +68,14 @@ export function startOpenClawStateLeaseHeartbeat(
     release();
     throw error;
   }
-  let handleReleaseError: Error | undefined;
+  let firstFailure: Error | undefined;
+  let releaseFailure: Error | undefined;
   const ready = createDeferredCore();
-  let failed = false;
   const fail = (error: Error) => {
-    if (failed || Atomics.load(shared, state.status) === state.closed) {
+    if (firstFailure || Atomics.load(shared, state.status) === state.closed) {
       return;
     }
-    failed = true;
+    firstFailure = error;
     Atomics.store(shared, state.status, state.lost);
     Atomics.notify(shared, state.ack);
     clearTimeout(startTimer);
@@ -86,10 +86,10 @@ export function startOpenClawStateLeaseHeartbeat(
     try {
       release();
     } catch (error) {
-      handleReleaseError = new Error("state lease heartbeat handle release failed", {
+      releaseFailure = new Error("state lease heartbeat handle release failed", {
         cause: error,
       });
-      fail(handleReleaseError);
+      fail(releaseFailure);
     }
   });
   // Worker stdio uses parent message delivery, which maintenance can block.
@@ -144,8 +144,8 @@ export function startOpenClawStateLeaseHeartbeat(
     stop() {
       close();
       return (stopping ??= worker.terminate().then((code) => {
-        if (handleReleaseError) {
-          throw handleReleaseError;
+        if (releaseFailure) {
+          throw firstFailure ?? releaseFailure;
         }
         return code;
       }));
