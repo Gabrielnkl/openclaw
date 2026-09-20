@@ -153,7 +153,9 @@ Agent display names, emoji, and avatars belong to each agent's `identity` block 
 - `seamColor`: operator accent color for native app UI chrome (Talk Mode bubble
   tint, etc.). The Control UI user accent (`ui.prefs.accent`) takes precedence in
   `talk.config` payloads and the macOS app's config snapshot. If neither is set,
-  the theme default applies.
+  the theme default applies. `prefs.accent` also accepts `"theme"` to explicitly
+  select the Control UI theme palette without inheriting `seamColor`; `talk.config`
+  omits its hex-only accent in that case.
 - `prefs`: cross-device operator preferences. This is the canonical home so agents can
   change them through the approval gate and every Control UI client stays in
   sync; browsers mirror the values into local storage for instant boot. An
@@ -199,10 +201,12 @@ a Gateway connection keep TTL-only tokens.
 ```
 
 - `desktop.host.enabled`: advertises **This machine** as a desktop source after
-  the Gateway restarts.
+  the Gateway restarts. Turning Host Desktop off in Labs writes `enabled: false`
+  and preserves its managed mode, port, and password-file settings.
 - `desktop.host.managed`: Linux only. Starts a gateway-supervised, loopback-only
-  TigerVNC/XFCE desktop lazily on the first observation and stops it after the
-  desktop session's linger period. Default: `false`.
+  TigerVNC/XFCE desktop lazily on the first observation or computer discovery.
+  Stops it after the desktop session's linger period when no observer or active
+  computer execution holds it. Default: `false`.
 - `desktop.host.port`: loopback RFB port on `127.0.0.1` (default: `5900`).
 - `desktop.host.passwordFile`: optional UTF-8 VNC password file for attach mode.
   Without it, the Control UI prompts for a VNC password and keeps it in browser
@@ -211,11 +215,26 @@ a Gateway connection keep TTL-only tokens.
 
 OpenClaw connects only through loopback. An explicit `port` always selects
 attach mode, and an existing RFB listener on port `5900` takes precedence over
-managed mode. Managed mode requires `Xtigervnc`, `tigervncpasswd`, and
-`startxfce4`; on Debian/Ubuntu, install
-`tigervnc-standalone-server tigervnc-tools xfce4-session`. The Gateway creates a
+managed mode. Managed mode requires `Xtigervnc`, `tigervncpasswd`,
+`startxfce4`, and `dbus-daemon`; on Debian/Ubuntu, install
+`tigervnc-standalone-server tigervnc-tools xfce4-session dbus-daemon`. The Gateway creates a
 fresh temporary VNC password for each managed session, never persists it, and
-supervises both the VNC server and XFCE session.
+supervises the VNC server, XFCE session, and private D-Bus session.
+
+To let an agent control this desktop, explicitly enable `cua-computer` on the
+Gateway host and expose the `computer` tool in its tool policy. The Gateway and
+paired nodes reuse the same computer provider; the Gateway needs no paired node
+for its own desktop. Its helper receives the managed desktop's X11 display and
+private D-Bus address. Closing the Desktop panel keeps an active computer
+execution alive; stopping or restarting the desktop closes that execution before
+replacing the display. See [Computer use](/nodes/computer-use#gateway-desktop).
+
+An external VNC stream alone does not identify a native display that CUA can
+control. If an external listener takes precedence over managed mode, the managed
+computer route reports the mismatch. Outside managed mode, a Gateway computer
+uses its process's native desktop environment and the provider's availability
+checks. Existing configuration and node pairing remain unchanged on update;
+enabling the Desktop panel does not automatically enable CUA.
 
 If desktop teardown fails, the Gateway retains the session's cleanup owner and
 reports the failure in its logs. A new observation retries cleanup before

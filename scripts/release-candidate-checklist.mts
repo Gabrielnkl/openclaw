@@ -22,6 +22,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { parse as parseYaml } from "yaml";
 import {
   normalizePublicationIntent,
+  publicationAdmissionContract,
   publicationDispatchEnvelope,
   publicationSourceContract,
   type PublicationSelection,
@@ -37,6 +38,7 @@ import { readBoundedResponseText } from "./lib/bounded-response.mjs";
 import { parsePluginReleaseSelection } from "./lib/plugin-npm-release.ts";
 import { loadChangelogCollection, loadReleaseChangelog } from "./lib/release-changelog.mjs";
 import { releaseBranchForTag } from "./lib/release-context.mjs";
+import { formatReleasePublishPreflight } from "./lib/release-publish-preflight-interface.mts";
 import { classifyReleaseTrain, parseReleaseVersion } from "./lib/release-version.mjs";
 import {
   downloadFullReleaseNpmPreflight,
@@ -45,6 +47,7 @@ import {
 } from "./npm-preflight-tooling-identity.mjs";
 import { validateNpmPreflightDistTag } from "./openclaw-npm-extended-stable-release.mjs";
 import { validatePluginSdkApiReleaseEvidence } from "./plugin-sdk-api-release-evidence.mjs";
+import { runReleasePublishPreflight } from "./release-publish-preflight.mts";
 import { verifyReleaseToolingIdentity } from "./release-tooling-identity.mjs";
 import {
   dedicatedSectionVersionForTag,
@@ -60,8 +63,7 @@ import {
 } from "./render-github-release-notes.mts";
 import {
   isShaPinnedReleaseValidationBranch,
-  runStrictReleaseEvidenceValidation,
-  validateFullReleaseValidationEvidence,
+  authenticateFullReleaseValidationEvidence,
 } from "./validate-full-release-validation-evidence.mjs";
 
 type JsonRecord = Record<string, unknown>;
@@ -2042,13 +2044,16 @@ async function main() {
   options.fullReleaseRunId = candidateState.fullReleaseRunId;
   options.npmPreflightRunId = candidateState.npmPreflightRunId;
   if (!options.fullReleaseRunId && !options.skipDispatch) {
+    const workflowSource = readFileSync(
+      join(TOOLING_ROOT, ".github/workflows/full-release-validation.yml"),
+      "utf8",
+    );
     if (
-      publicationSourceContract(
-        readFileSync(join(TOOLING_ROOT, ".github/workflows/full-release-validation.yml"), "utf8"),
-      ) !== "1"
+      publicationSourceContract(workflowSource) !== "1" ||
+      publicationAdmissionContract(workflowSource) !== "1"
     ) {
       throw new Error(
-        "Fresh checklist dispatch requires source-admission-capable frozen tooling; existing run recovery is unchanged.",
+        "Fresh checklist dispatch requires source and registry admission in frozen tooling; existing run recovery is unchanged.",
       );
     }
     const version = parseReleaseVersion(options.tag.replace(/^v/u, ""));
@@ -2099,17 +2104,6 @@ async function main() {
       )
     : "";
   const localGeneratedCheck = runLocalGeneratedCheckIfNeeded(options);
-
-  // Discover invalid plugin inputs and registry failures before starting expensive validation.
-  // Publishers rebuild these read-only plans; this snapshot never authorizes publication.
-  const pluginNpmPlan = await collectPluginPlanWithRetry(
-    "scripts/plugin-npm-release-plan.ts",
-    options,
-  );
-  const pluginClawHubPlan = await collectPluginPlanWithRetry(
-    "scripts/plugin-clawhub-release-plan.ts",
-    options,
-  );
 
   if (!options.fullReleaseRunId && !options.skipDispatch) {
     const workflowFile = "full-release-validation.yml";
@@ -2188,28 +2182,33 @@ async function main() {
   run("git", ["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], {
     capture: true,
   });
-  const fullValidationEvidence = validateFullReleaseValidationEvidence({
+  const fullValidationEvidence = await authenticateFullReleaseValidationEvidence({
     run: fullRun,
     manifest: fullManifest,
     expectedRepository: options.repo,
     expectedRunId: options.fullReleaseRunId,
+    expectedRunAttempt: fullRun.runAttempt,
     expectedTargetSha: targetSha,
     expectedReleaseTag: options.tag,
     expectedWorkflowBranch: options.workflowRef,
     expectedPublicationSelection: () => publicationSelectionForChecklist(options),
-    getWorkflowSource: (sha: string) =>
-      run(
-        "git",
-        ["--no-lazy-fetch", "show", `${sha}:.github/workflows/full-release-validation.yml`],
-        { cwd: TOOLING_ROOT, capture: true },
-      ),
     isTrustedMainAncestor: (sha: string) => gitIsAncestor(sha, "refs/remotes/origin/main"),
-    validateEvidenceReuseStrictly: ({ repository, runId }: { repository: string; runId: string }) =>
-      runStrictReleaseEvidenceValidation({ repository, runId }),
+    manifestPath: join(fullDir, "full-release-validation-manifest.json"),
+    verifierSourceSha: toolingSha,
+    verifierSourceContent: readFileSync(join(TOOLING_ROOT, "scripts/release-ci-summary.mjs")),
   });
   if (fullValidationEvidence.source === "direct" && fullRun.headSha !== targetSha) {
     throw new Error(`run SHA mismatch: tag=${targetSha} full=${fullRun.headSha}`);
   }
+  // Only exact historical producers retain local, non-authoritative planning.
+  // B recovery consumes its original hosted observations without another sweep.
+  const publicationAdmission = fullValidationEvidence.publicationAdmission;
+  const pluginNpmPlan = publicationAdmission
+    ? publicationAdmission.observations.plans.npm
+    : await collectPluginPlanWithRetry("scripts/plugin-npm-release-plan.ts", options);
+  const pluginClawHubPlan = publicationAdmission
+    ? publicationAdmission.observations.plans.clawhub
+    : await collectPluginPlanWithRetry("scripts/plugin-clawhub-release-plan.ts", options);
   if (npmUsesFullRun) {
     rmSync(npmDir, { recursive: true, force: true });
   }
@@ -2363,14 +2362,54 @@ async function main() {
     fullReleaseRunAttempt: fullRun.runAttempt,
     npmTelegramRunId: npmTelegram.runId,
   };
+  const publicationSelection = publicationSelectionForChecklist(options);
+  const publishPreflight = await runReleasePublishPreflight(
+    {
+      repo: options.repo,
+      tag: options.tag,
+      fullReleaseValidationRunId: options.fullReleaseRunId,
+      fullReleaseValidationRunAttempt: fullRun.runAttempt,
+      preflightRunId: options.npmPreflightRunId,
+      npmDistTag: options.npmDistTag,
+      pluginPublishScope: publicationSelection.pluginPublishScope,
+      plugins: options.plugins,
+      stableSoakWaiver: "",
+      workflowRef:
+        options.publishWorkflowRef || npmPreflightSource?.workflowRef || options.workflowRef,
+      releaseProfile: "from-validation",
+      publicationRoute: publicationSelection.route === "prepared" ? "prepared" : "normal",
+      publishOpenclawNpm: true,
+      openclawNpmResumeRunId: "",
+      pluginSdkApiAcknowledgement: options.pluginSdkApiAcknowledgement,
+      windowsNodeTag: options.windowsNodeTag,
+      windowsNodeInstallerDigests: options.windowsNodeInstallerDigests,
+      npmTelegramRunId: npmTelegram.runId ?? "",
+    },
+    {
+      manifest: fullManifest,
+      manifestPath: join(fullDir, "full-release-validation-manifest.json"),
+      run: fullRun,
+      targetSha,
+      toolingSha,
+      allowPlannedTag: true,
+      npmManifest,
+      npmManifestPath: join(npmDir, "preflight-manifest.json"),
+      npmPreflightRun: npmRun,
+      fullValidationEvidence,
+    },
+  );
+  const publishPreflightTable = formatReleasePublishPreflight(publishPreflight, {
+    includeCommand: false,
+  });
   const publishCommand =
-    options.publicationRoute === "normal"
-      ? buildPublishCommand(publicationOptions, npmPreflightSource)
-      : undefined;
+    options.publicationRoute === "normal" ? publishPreflight.command : undefined;
   const prepareCommand =
     options.publicationRoute === "prepared"
       ? buildPublishCommand(publicationOptions, npmPreflightSource, "prepare")
       : undefined;
+  if (prepareCommand) {
+    publishPreflight.command = prepareCommand;
+  }
   const evidence = {
     version: 1,
     tag: options.tag,
@@ -2379,6 +2418,7 @@ async function main() {
     publishWorkflowIdentity,
     publicationRoute: options.publicationRoute,
     sourceAdmission: fullManifest.sourceAdmission ?? null,
+    publicationAdmission,
     npmDistTag: options.npmDistTag,
     fullReleaseValidationRunId: options.fullReleaseRunId,
     fullReleaseValidationRunAttempt: fullRun.runAttempt,
@@ -2411,6 +2451,7 @@ async function main() {
     npmTelegram,
     pluginNpmPlan,
     pluginClawHubPlan,
+    publishPreflight,
     publishCommand,
     prepareCommand,
   };
@@ -2455,13 +2496,17 @@ async function main() {
       `- tarball sha256: ${actualTarballSha}`,
       `- npm dist-tag: ${options.npmDistTag}`,
       `- intended publication route: ${options.publicationRoute}`,
-      "- FRV source admission is source-only, not registry eligibility or publication authority.",
+      publicationAdmission
+        ? "- FRV registry observations are authenticated retained admission evidence, not publication authority. Pending owner actions and final publisher checks remain required."
+        : "- Historical FRV source admission and local registry plans are not registry eligibility or publication authority.",
       ...formatPluginPlanSummary("plugin npm plan", pluginNpmPlan),
       ...formatPluginPlanSummary("ClawHub plan", pluginClawHubPlan),
       `- Parallels: ${parallels.status}${parallels.reason ? ` (${parallels.reason})` : ""}`,
       `- NPM Telegram E2E: ${npmTelegram.status}${
         npmTelegram.runId ? ` ${npmTelegram.runId} ${npmTelegram.url}` : ""
       }`,
+      "",
+      publishPreflightTable,
       "",
       ...(prepareCommand
         ? [
@@ -2480,10 +2525,13 @@ async function main() {
         : []),
     ].join("\n"),
   );
-  updateReleaseCandidateState(statePath, candidateState, "completed");
-
   console.log(`release candidate evidence: ${evidencePath}`);
   console.log(`release candidate summary: ${evidenceMarkdownPath}`);
+  console.log(publishPreflightTable);
+  if (publishPreflight.failed) {
+    throw new Error("Publish preflight failed; resolve the reported gates before publication.");
+  }
+  updateReleaseCandidateState(statePath, candidateState, "completed");
   if (androidVersionCheck) {
     console.log(androidVersionCheck.message);
   }

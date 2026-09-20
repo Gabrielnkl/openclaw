@@ -11,6 +11,7 @@ import {
   getAgentRunContext,
   getAgentRunContextOwnership,
   getAgentRunLifecycleGeneration,
+  recordAgentRunModel,
   registerAgentRunSequenceResetHandler,
   resetAgentRunRegistryForTest,
   rotateAgentRunRegistryLifecycleGeneration,
@@ -107,7 +108,6 @@ type AgentEventState = {
   lifecycleRotationHandlers?: Map<string, (lifecycleGeneration: string) => void>;
 };
 
-const AGENT_EVENT_STATE_KEY = Symbol.for("openclaw.agentEvents.state");
 const AGENT_EVENT_ROUTING_FIELDS = [
   ["controlUiVisible", "isControlUiVisible"],
   ["projectSessionLifecycle", "projectSessionLifecycle"],
@@ -119,7 +119,8 @@ const AGENT_EVENT_ROUTING_FIELDS = [
 ] as const;
 
 function getAgentEventState(): AgentEventState {
-  return resolveGlobalSingleton<AgentEventState>(AGENT_EVENT_STATE_KEY, () => ({
+  // Lifecycle owners can register before an importing runtime chunk finishes initialization.
+  return resolveGlobalSingleton<AgentEventState>(Symbol.for("openclaw.agentEvents.state"), () => ({
     seqByRun: new Map<string, number>(),
     listeners: new Map(),
     runListeners: new Map(),
@@ -218,6 +219,7 @@ export function rotateAgentEventLifecycleGeneration(): string {
 function enrichAgentEvent(
   event: Omit<AgentEventPayload, "seq" | "ts">,
   claimId?: string,
+  expectedContext?: AgentRunContext,
 ): AgentEventRuntimePayload | undefined {
   const state = getAgentEventState();
   const currentLifecycleGeneration = getAgentRunLifecycleGeneration();
@@ -238,6 +240,9 @@ function enrichAgentEvent(
     return undefined;
   }
   const context = getAgentRunContext(event.runId);
+  if (expectedContext && context !== expectedContext) {
+    return undefined;
+  }
   const scope = getAgentEventExecutionContext().getStore();
   const executionLifecycleGeneration = event.lifecycleGeneration ?? scope?.lifecycleGeneration;
   const ownedLifecycleGeneration = executionLifecycleGeneration ?? context?.lifecycleGeneration;
@@ -257,10 +262,29 @@ function enrichAgentEvent(
   const record = scope?.routingByRun?.get(event.runId);
   const captured =
     record?.routing.lifecycleGeneration === ownedLifecycleGeneration ? record : undefined;
-  if (captured && context && captured.owner.deref() !== context) {
+  const capturedOwner = captured?.owner.deref();
+  if (captured && context && capturedOwner !== context) {
     return undefined;
   }
   const routing = context ?? captured?.routing;
+  if (event.stream === "lifecycle" && event.data.phase === "model") {
+    if (!context || (claimId === undefined && (expectedContext ?? capturedOwner) !== context)) {
+      return undefined;
+    }
+    const { provider, model } = event.data;
+    if (provider === null && model === null) {
+      recordAgentRunModel(event.runId, undefined);
+    } else if (
+      typeof provider === "string" &&
+      provider.trim() &&
+      typeof model === "string" &&
+      model.trim()
+    ) {
+      recordAgentRunModel(event.runId, { provider, model });
+    } else {
+      return undefined;
+    }
+  }
   let data = event.data;
   if (routing && event.stream === "lifecycle") {
     if (routing.completionSource) {
@@ -432,6 +456,17 @@ export function emitAgentEventForOwner(
   claimId: string,
 ) {
   const enriched = enrichAgentEvent(event, claimId);
+  if (enriched) {
+    notifyListeners(iterateAgentEventListeners(getAgentEventState(), enriched), enriched);
+  }
+}
+
+/** Emits only while the exact run-context record captured by its producer remains current. */
+export function emitAgentEventForRunContext(
+  event: Omit<AgentEventPayload, "seq" | "ts">,
+  context: AgentRunContext,
+) {
+  const enriched = enrichAgentEvent(event, undefined, context);
   if (enriched) {
     notifyListeners(iterateAgentEventListeners(getAgentEventState(), enriched), enriched);
   }

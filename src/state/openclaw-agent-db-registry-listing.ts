@@ -4,13 +4,19 @@ import type { DatabaseSync } from "node:sqlite";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { resolveSqliteDatabaseFilePaths } from "../infra/sqlite-files.js";
 import { normalizeAgentId } from "../routing/session-key.js";
+import { sessionChanges } from "../sessions/session-row-changes.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import {
   OPENCLAW_AGENT_SCHEMA_VERSION,
+  type OpenClawAgentDatabaseRegistrationCommit,
   type OpenClawRegisteredAgentDatabase,
 } from "./openclaw-agent-db-contract.js";
 import {
-  withExistingOpenClawStateDatabaseArtifactPreservingReadOnly,
+  isStateDatabaseReadAdmissionInvalidatedError,
+  type OpenClawStateDatabaseReadAdmission,
+} from "./openclaw-state-db-async-lifecycle.js";
+import {
+  withExistingOpenClawStateDatabaseArtifactPreservingReadOnlyAsync,
   withExistingOpenClawStateDatabaseReadOnly,
 } from "./openclaw-state-db-readonly.js";
 import { detectOpenClawStateDatabaseSchemaMigrationsFromDatabase } from "./openclaw-state-db-schema-repair.js";
@@ -67,6 +73,62 @@ export function invalidateRegisteredAgentDatabasesMemo(
   if (registry.memo?.pathname === pathname) {
     registry.memo = { pathname, token: Symbol(pathname) };
   }
+}
+
+/** Publish only registration witnessed at COMMIT, under its original shared generation. */
+export function captureOpenClawAgentDatabaseRegistration(params: {
+  agentId: string;
+  agentPath: string;
+  admission: OpenClawStateDatabaseReadAdmission;
+}) {
+  const options = { path: params.admission.databasePath };
+  let active = false;
+  let committed = false;
+  let finished = false;
+  return {
+    begin() {
+      if (finished) {
+        throw new Error("Agent database registration admission is closed");
+      }
+      if (!active) {
+        active = true;
+        invalidateRegisteredAgentDatabasesMemo(options);
+      }
+    },
+    recordCommitted(receipt: OpenClawAgentDatabaseRegistrationCommit) {
+      if (
+        finished ||
+        !active ||
+        receipt.agentId !== params.agentId ||
+        receipt.agentPath !== params.agentPath ||
+        receipt.stateDatabasePath !== params.admission.databasePath ||
+        receipt.stateDatabaseIdentity !== params.admission.identity.key
+      ) {
+        throw new Error("Agent registration commit differs from its captured owner");
+      }
+      committed = true;
+    },
+    finish() {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      try {
+        params.admission.assertCurrent();
+      } catch (error) {
+        if (isStateDatabaseReadAdmissionInvalidatedError(error)) {
+          return;
+        }
+        throw error;
+      }
+      if (active) {
+        invalidateRegisteredAgentDatabasesMemo(options);
+      }
+      if (committed) {
+        sessionChanges.emit({ all: true, scope: "stores" });
+      }
+    },
+  };
 }
 
 function cloneRegisteredAgentDatabases(
@@ -134,10 +196,31 @@ export function readOpenClawAgentDatabaseRegistryRows(database: DatabaseSync, pa
   ).rows;
 }
 
-function readRegisteredAgentDatabases(
+export function readAgentDatabasePreflightTargets(database: DatabaseSync, registryPath: string) {
+  return readOpenClawAgentDatabaseRegistryRows(database, registryPath).flatMap((row) =>
+    typeof row.agent_id === "string" && typeof row.path === "string"
+      ? [
+          {
+            agentId: row.agent_id,
+            path: resolveOpenClawRegisteredAgentDatabasePath(registryPath, row.path),
+          },
+        ]
+      : [],
+  );
+}
+
+export function readRegisteredAgentDatabases(
+  options: AgentDatabaseRegistryListOptions,
+  artifactPreserving: false,
+): OpenClawRegisteredAgentDatabase[];
+export function readRegisteredAgentDatabases(
+  options: AgentDatabaseRegistryListOptions,
+  artifactPreserving: true,
+): Promise<OpenClawRegisteredAgentDatabase[]>;
+export function readRegisteredAgentDatabases(
   options: AgentDatabaseRegistryListOptions,
   artifactPreserving: boolean,
-): OpenClawRegisteredAgentDatabase[] {
+): OpenClawRegisteredAgentDatabase[] | Promise<OpenClawRegisteredAgentDatabase[]> {
   const pathname = resolveAgentDatabaseRegistryPath(options);
   const read = ({ db: database }: { db: import("node:sqlite").DatabaseSync }) => {
     const schemaMigrations = detectOpenClawStateDatabaseSchemaMigrationsFromDatabase(
@@ -157,24 +240,26 @@ function readRegisteredAgentDatabases(
       sizeBytes: row.size_bytes,
     }));
   };
-  const entries = artifactPreserving
-    ? withExistingOpenClawStateDatabaseArtifactPreservingReadOnly(read, options)
-    : withExistingOpenClawStateDatabaseReadOnly(read, options);
-  if (entries === undefined) {
-    if (hasUnavailableMissingSqlitePath(pathname)) {
-      throw new Error(`OpenClaw state database ${pathname} is unavailable.`);
+  const finish = (entries: OpenClawRegisteredAgentDatabase[] | undefined) => {
+    if (entries === undefined) {
+      if (hasUnavailableMissingSqlitePath(pathname)) {
+        throw new Error(`OpenClaw state database ${pathname} is unavailable.`);
+      }
+      return [];
     }
-    return [];
-  }
-  return options.includeIncompatibleSchemaVersions
-    ? entries
-    : entries.filter((entry) => entry.schemaVersion === OPENCLAW_AGENT_SCHEMA_VERSION);
+    return options.includeIncompatibleSchemaVersions
+      ? entries
+      : entries.filter((entry) => entry.schemaVersion === OPENCLAW_AGENT_SCHEMA_VERSION);
+  };
+  return artifactPreserving
+    ? withExistingOpenClawStateDatabaseArtifactPreservingReadOnlyAsync(read, options).then(finish)
+    : finish(withExistingOpenClawStateDatabaseReadOnly(read, options));
 }
 
 /** Inspect a copied registry without creating SQLite artifacts or runtime memo state. */
-export function inspectOpenClawRegisteredAgentDatabases(
+export async function inspectOpenClawRegisteredAgentDatabases(
   options: AgentDatabaseRegistryListOptions = {},
-): OpenClawRegisteredAgentDatabase[] {
+): Promise<OpenClawRegisteredAgentDatabase[]> {
   return readRegisteredAgentDatabases(options, true);
 }
 

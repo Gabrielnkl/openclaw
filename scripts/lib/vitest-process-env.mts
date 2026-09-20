@@ -150,6 +150,10 @@ export const VITEST_CONFIG_NO_OUTPUT_TIMEOUT_MS = new Map([
     "test/vitest/vitest.gateway-server.config.ts",
     DEFAULT_EXTRA_LONG_RUNNING_VITEST_NO_OUTPUT_TIMEOUT_MS,
   ],
+  [
+    "test/vitest/vitest.gateway-database-workers.config.ts",
+    DEFAULT_EXTRA_LONG_RUNNING_VITEST_NO_OUTPUT_TIMEOUT_MS,
+  ],
 ]);
 for (const owner of embeddedAgentVitestProjectOwners) {
   VITEST_CONFIG_NO_OUTPUT_TIMEOUT_MS.set(
@@ -165,7 +169,9 @@ export function resolveVitestNodeArgs(env: NodeJS.ProcessEnv = process.env): str
     return [];
   }
 
-  return ["--no-maglev"];
+  // Concurrent Sparkplug can await main-thread GC while forced exit joins its
+  // compiler worker (nodejs/node#54918). Keep Sparkplug compilation on the main thread.
+  return ["--no-maglev", "--no-concurrent-sparkplug"];
 }
 
 /**

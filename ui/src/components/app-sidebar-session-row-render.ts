@@ -5,18 +5,14 @@ import { ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
 import type { SessionObserverDigest } from "../../../packages/gateway-protocol/src/schema/sessions.js";
 import { normalizeSessionColorValue } from "../../../packages/gateway-protocol/src/session-agent-status.js";
+import type { GatewaySessionRow } from "../api/types.ts";
 import type { NavigationRouteId } from "../app-navigation.ts";
-import { withSidebarNavCollapseIntent } from "../app-session-route-paths.ts";
 import { sessionHasPendingApproval } from "../app/approval-presentation.ts";
 import type { ApplicationContext, ApplicationNavigationOptions } from "../app/context.ts";
 import { resolveControlUiAuthCandidates } from "../app/control-ui-auth.ts";
 import { t } from "../i18n/index.ts";
-import { formatDurationCompact } from "../lib/format.ts";
-import {
-  restartHoverMarqueeIfHovered,
-  startHoverMarqueeFromEvent,
-  stopHoverMarqueeFromEvent,
-} from "../lib/hover-marquee.ts";
+import { formatDurationCompact } from "../lib/format-duration.ts";
+import { renderHoverMarquee } from "../lib/hover-marquee.ts";
 import { handleContextMenuEvent } from "../lib/keyboard-shortcuts.ts";
 import { presenceMatchesProfile, projectPresencePayload } from "../lib/presence-users.ts";
 import type { CatalogSessionKey } from "../lib/sessions/catalog-key.ts";
@@ -103,7 +99,7 @@ export interface SessionListHost {
   readonly sessionOwnerFilterId: string | null;
   readonly sessionInvolvingMeFilterActive: boolean;
   readonly sessionOwnerOptions: readonly SessionOwnerOption[];
-  readonly sessionOwnershipVisible: boolean;
+  readonly sessionOwnershipVisibility: { filters: boolean; avatars: boolean };
   readonly onOpenNewSession?: (agentId: string, target?: NewSessionTarget) => void;
   readonly onNavigate?: (
     routeId: NavigationRouteId,
@@ -111,7 +107,7 @@ export interface SessionListHost {
   ) => void;
 
   readonly sessionPullRequests: Pick<SessionPullRequestIndicatorsController, "summary">;
-  mainSessionRow(): { key: string } | null;
+  mainSessionRow(): GatewaySessionRow | null;
   setSessionOwnerFilter(ownerId: string | null, involvingMe?: boolean): void;
   isSessionChildrenExpanded(session: SidebarRecentSession): boolean;
   isSessionChildrenFullyShown(sessionKey: string): boolean;
@@ -188,7 +184,7 @@ function renderSidebarSessionIndicators(
       : session.owner?.assignedAt !== undefined
         ? "owned"
         : "created";
-  const ownerActor = host.sessionOwnershipVisible
+  const ownerActor = host.sessionOwnershipVisibility.avatars
     ? host.sessionsStatusFilter === "archived"
       ? session.archivedBy
       : session.owner?.actor
@@ -205,8 +201,20 @@ function renderSidebarSessionIndicators(
   // only for live presence; pinned and archive-attribution rows have no matching header.
   const ownerRepeatedBySection =
     host.sessionsGrouping === "person" && !session.pinned && ownerAttribution !== "archived";
+  // A self filter already identifies solo ownership. Keep shared rows and
+  // archive attribution visible; the participant count includes unshown faces.
+  const selfUser = host.sessionDataContext?.gateway.snapshot.selfUser;
+  const selfProfileId = selfUser?.identity?.id ?? selfUser?.id;
+  const ownerRepeatedByFilter =
+    ownerAttribution !== "archived" &&
+    ownerActor?.identity?.type === "profile" &&
+    ownerActor.identity.id === selfProfileId &&
+    (host.sessionInvolvingMeFilterActive || host.sessionOwnerFilterId === ownerActor.id) &&
+    (session.participantCount ?? session.participants?.length ?? 0) === 0;
   const leadingOwner =
-    !team && ownerRepeatedBySection && ownerViewing !== true ? undefined : ownerActor;
+    ownerRepeatedByFilter || (!team && ownerRepeatedBySection && ownerViewing !== true)
+      ? undefined
+      : ownerActor;
   const gateway = host.sessionDataContext?.gateway;
   const channelAvatarAuth = {
     authTokens: gateway
@@ -235,21 +243,16 @@ function renderSidebarSessionIndicators(
   const hasTrail = session.isChild && (session.runtimeMs != null || session.startedAt != null);
   const metaId = hasTrail ? sidebarSessionMetaId(session.key) : undefined;
   const stateId = !team && stateDescription ? sidebarSessionStateId(session.key) : undefined;
-  const persistentIndicator =
-    team && leadingIndicator === nothing && session.visibility !== "draft"
-      ? nothing
-      : html`<span class="sidebar-session-indicator"
-          >${leadingIndicator}
-          ${
-            session.visibility === "draft"
-              ? html`<span
-                  class="session-row-draft-indicator"
-                  title=${t("chat.sessionSharing.draft")}
-                  >👻</span
-                >`
-              : nothing
-          }</span
-        >`;
+  const persistentIndicator = html`<span class="sidebar-session-indicator"
+    >${leadingIndicator}
+    ${
+      session.visibility === "draft"
+        ? html`<span class="session-row-draft-indicator" title=${t("chat.sessionSharing.draft")}
+            >👻</span
+          >`
+        : nothing
+    }</span
+  >`;
   const originIndicators = html`${session.archived ? html`<span class="sidebar-session__archive-glyph" role="img" aria-label=${t("sessionsView.archived")} title=${t("sessionsView.archived")}>${icons.archive}</span>` : nothing}${session.forkSource ? html`<span class="sidebar-session-fork-indicator" aria-hidden=${team || session.isChild ? nothing : "true"} role="img" aria-label=${t("sessionsView.forkedSession")}>${icons.gitFork}</span>` : nothing}`;
   const trail = hasTrail
     ? html`<span class="session-row-trail" id=${metaId}
@@ -285,8 +288,8 @@ function renderSidebarSessionIndicators(
         .maxVisible=${3}
         variant="session"
       ></openclaw-viewer-facepile>
-      ${team ? originIndicators : nothing} ${team ? persistentIndicator : nothing}
-      ${team && (session.workSession || session.acpSession) && !pullRequest ? html`<span class="session-row-badge" role="img" aria-label=${t("chat.sidebar.coding")} title=${session.subtitle ?? t("chat.sidebar.coding")}>${icons.terminal}</span>` : nothing}
+      ${team ? originIndicators : nothing}
+      ${team && (session.workSession || session.acpSession) && !session.workspaceKind && !pullRequest ? html`<span class="session-row-badge" role="img" aria-label=${t("chat.sidebar.coding")} title=${session.subtitle ?? t("chat.sidebar.coding")}>${icons.terminal}</span>` : nothing}
       ${team && session.hasAutomation ? html`<span class="session-row-badge" role="img" aria-label=${t("tabs.cron")} title=${t("tabs.cron")}>${icons.clock}</span>` : nothing}
       ${renderSessionRowBadges({
         isChild: session.isChild,
@@ -366,7 +369,9 @@ export function renderRecentSession(params: {
     team ? "sidebar-recent-session--team" : "",
     color ? "sidebar-recent-session--colored" : "",
     session.isChild ? "sidebar-recent-session--child" : "",
-    team || !subtitle ? "sidebar-recent-session--single-line" : "",
+    team || (!subtitle && !session.channelPresentation)
+      ? "sidebar-recent-session--single-line"
+      : "",
     session.archived ? "sidebar-session--archived" : "",
     session.visuallyActive ? "sidebar-recent-session--active" : "",
     host.selectedSessionKeys.has(session.key) ? "sidebar-recent-session--selected" : "",
@@ -380,7 +385,8 @@ export function renderRecentSession(params: {
       : "",
     (team ? ownAttention : session.attention).kind === "error"
       ? "sidebar-recent-session--attention-danger"
-      : (team ? ownAttention : session.attention).kind !== "none"
+      : (team ? ownAttention : session.attention).kind !== "none" &&
+          (team ? ownAttention : session.attention).kind !== "question"
         ? "sidebar-recent-session--attention-amber"
         : "",
     host.sessionOrganizer.draggingSessionKey === session.key
@@ -394,11 +400,10 @@ export function renderRecentSession(params: {
     requiredScope: "operator.write",
   });
   const rowDraggable = !session.isChild && groupWriteAccess.allowed;
-  const marqueeLabelTemplate = html`<span
-    ${display ? ref(restartHoverMarqueeIfHovered) : nothing}
-    class="sidebar-recent-session__name hover-marquee"
-    >${team ? nothing : indicators.originIndicators}${label}</span
-  >`;
+  const marqueeLabelTemplate = renderHoverMarquee(
+    html`${team ? nothing : indicators.originIndicators}${label}`,
+    "sidebar-recent-session__name",
+  );
   const marqueeLabel = display
     ? keyed(
         JSON.stringify([
@@ -439,21 +444,20 @@ export function renderRecentSession(params: {
       }
       @contextmenu=${openMenuFromEvent}
       @keydown=${openMenuFromEvent}
-      @mouseenter=${startHoverMarqueeFromEvent}
-      @mouseleave=${stopHoverMarqueeFromEvent}
     >
       <a
-        href=${withSidebarNavCollapseIntent(host.sidebarSessionHref(session))}
+        href=${host.sidebarSessionHref(session)}
         class="sidebar-recent-session__link"
         draggable="false"
         aria-current=${session.visuallyActive ? "page" : nothing}
         aria-describedby=${[stateId, metaId].filter(Boolean).join(" ") || nothing}
         @click=${(event: MouseEvent) => host.handleSessionRowClick(event, session)}
       >
-        ${team ? nothing : persistentIndicator}
+        ${persistentIndicator}
         <span class="sidebar-recent-session__text">
           <span class="sidebar-recent-session__title-row"> ${marqueeLabel} </span>
           <span class="sidebar-recent-session__details">
+            ${session.channelPresentation ? html`<span class="sidebar-recent-session__channel" aria-label=${t("sessionHovercard.linkedChannel", { channel: session.channelPresentation.channelLabel })}>${session.channelPresentation.channelLabel}</span>` : nothing}
             ${team ? nothing : renderSidebarSessionSubtitle({ subtitle, narration })}
             ${indicators.content}
           </span>
@@ -613,7 +617,7 @@ export function renderSessionTree(params: {
                   </button>`
                 : nothing
             }
-            ${renderChildSessionLoadError(host, session.key)}
+            ${(session.childLoadParentKeys ?? [session.key]).map((key) => renderChildSessionLoadError(host, key))}
             ${
               session.loadingChildren && session.children.length === 0
                 ? html`<span

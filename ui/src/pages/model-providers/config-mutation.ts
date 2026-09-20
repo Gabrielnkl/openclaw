@@ -1,8 +1,11 @@
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { FastMode, ModelsProbeResult } from "../../api/types.ts";
+import type { ApplicationContext } from "../../app/context.ts";
 import { t } from "../../i18n/index.ts";
+import { currentConfigObject } from "../../lib/config/config-state-model.ts";
 import type { RuntimeConfigCapability } from "../../lib/config/runtime-config-capability.ts";
 import { formatUiError } from "../../lib/format-error.ts";
+import { invalidateModelAuthStatusRequests } from "../../lib/model-auth-request-state.ts";
 import type { DefaultModelSelection } from "./data.ts";
 
 export type ModelBehaviorConfig = {
@@ -36,6 +39,7 @@ export function modelDefaultsActions(
       });
     },
     onUtilityChange: (model: string | null) => stageDefaults({ utilityModel: model }),
+    onDecisionChange: (model: string | null) => stageDefaults({ decisionModel: model }),
     onThinkingChange: (level: string) =>
       stageDefaults({ thinkingLevel: level, thinkingOverridden: true }),
     onThinkingReset: () => stageDefaults({ thinkingLevel: undefined, thinkingOverridden: false }),
@@ -69,6 +73,7 @@ export function buildDefaultsPatch(params: {
   primary: string;
   fallbacks: readonly string[];
   utilityModel: string | null;
+  decisionModel?: string | null;
   thinkingLevel: string | undefined;
   thinkingOverridden: boolean;
   fastMode: FastMode | undefined;
@@ -86,6 +91,7 @@ export function buildDefaultsPatch(params: {
             }
           : {}),
         utilityModel: params.utilityModel,
+        ...(params.decisionModel !== undefined ? { decisionModel: params.decisionModel } : {}),
         thinkingDefault:
           params.thinkingOverridden && params.thinkingLevel ? params.thinkingLevel : null,
         fastModeDefault:
@@ -135,7 +141,7 @@ export function mergeProbeResults(cardId: string, results: ModelsProbeResult[]):
 }
 
 export type ModelProviderRowMessage = {
-  kind: "success" | "error";
+  kind: "success" | "warning" | "error";
   text: string;
   warning?: string;
 };
@@ -144,7 +150,6 @@ export type ModelProviderConfigMutation = {
   key: string;
   raw: Record<string, unknown>;
   note: string;
-  success: string;
   replacePaths?: string[];
 };
 
@@ -161,6 +166,23 @@ type ModelProviderConfigMutationOwner = {
   setBusy: (busy: boolean) => void;
   setMessage: (message: ModelProviderRowMessage | null) => void;
 };
+
+export function modelProviderConfigMutationBlockedReason(
+  context: Pick<ApplicationContext, "gateway" | "runtimeConfig">,
+): string | null {
+  const snapshot = context.gateway.snapshot;
+  if (snapshot.phase !== "connected") {
+    return t("modelProviders.readOnly.disconnected");
+  }
+  if (context.runtimeConfig.canPatch !== true) {
+    return t("modelProviders.readOnly.adminRequired");
+  }
+  const config = context.runtimeConfig.state;
+  if (!snapshot.client || config.client !== snapshot.client || !currentConfigObject(config)) {
+    return t("modelProviders.configUnavailable");
+  }
+  return null;
+}
 
 export function modelProviderErrorMessage(error: unknown): string {
   return formatUiError(error, t("modelProviders.requestFailed"));
@@ -217,12 +239,8 @@ export async function runModelProviderConfigMutation(
     if (!owner.isCurrentClient()) {
       return { ok: false };
     }
-    if (owner.isCurrentAgent()) {
-      owner.setMessage({
-        kind: "success",
-        text: params.success,
-        ...(warning ? { warning } : {}),
-      });
+    if (owner.isCurrentAgent() && warning) {
+      owner.setMessage({ kind: "warning", text: warning });
     }
     return { ok: true, agentEpoch, warning };
   } catch (error) {
@@ -256,12 +274,12 @@ export async function runModelProviderApiKeyMutation(
   owner.setMessage(null);
   try {
     const result = await owner.runtimeConfig.runExternalMutation(
-      (client) => {
+      async (client) => {
         if (client !== params.client) {
           throw new Error(t("modelProviders.requestFailed"));
         }
         const target = { provider: params.provider, agentId: params.agentId };
-        return params.apiKey === null
+        const receipt = await (params.apiKey === null
           ? client.request<{ warning?: string }>("models.authLogout", {
               ...target,
               credentialType: "api_key",
@@ -269,7 +287,9 @@ export async function runModelProviderApiKeyMutation(
           : client.request<{ warning?: string }>("models.authSetApiKey", {
               ...target,
               apiKey: params.apiKey,
-            });
+            }));
+        invalidateModelAuthStatusRequests(client);
+        return receipt;
       },
       { canDispatch: () => isCurrent() && owner.canMutate() },
     );

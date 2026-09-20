@@ -53,6 +53,15 @@ success, or publication authority. `diagnostic`, `main-qualification`, and
 `postpublish-confidence` omit `publication_selection_json` and record publication
 source admission as not applicable. Coverage is selected independently.
 
+Fresh publish requests also require tooling with registry admission. After
+source verification, resolution collects bounded public npm and ClawHub
+observations for the selected packages, uploads them, then binds the immutable
+artifact and admission time before producers can start. Required read errors and
+unsupported bootstrap states block admission; latest-dependency drift is advisory.
+Supported first-package or trust-repair routes retain unresolved downstream owner
+authority, not permission to publish. The source fact remains source-only.
+Nonpublish requests do not collect registry observations.
+
 The SHA-pinned helper packs its semantic `-f validation_purpose` and
 `-f publication_selection_json` arguments into the existing
 `trusted_workflow_json` input. Raw workflow dispatch uses this closed envelope:
@@ -67,6 +76,10 @@ without converting their inputs or witness digests.
 merely supplying a protected tooling ref does not select that route. Saved state
 binds the choice and rejects contradictory resumes. Historical state without a
 route retains normal recovery semantics and gains no source-admission claim.
+For registry-admitted parents, the checklist reads authenticated retained planning
+summaries instead of repeating the two local registry sweeps. Preparation and
+publication compare that evidence with their actual selected operands; a normal
+parent cannot authorize the prepared route by changing the command afterward.
 
 Record the candidate SHA/ref and Tooling SHA/ref once for the release and reuse
 them for later Code-SHA, Release-SHA, and focused reruns. Main lineage
@@ -153,12 +166,15 @@ required coverage, gate results, reuse identity, the original parent attempt,
 the fresh candidate request plus producer and publisher evidence when preparation ran, and
 every exact child run ID, attempt, title, workflow ref, and Tooling SHA.
 Decision, Drain, manifest generation, evidence verification, and the final
-verifier consume the artifact for their current attempt. Collector retries
-use the exact run-ID cache as an acceleration. If that cache is unavailable,
-they restore the same immutable plan from the parent-run artifact, validate it,
-and upload the artifact again for the retry; they never rebuild the plan or
-redispatch tests. A missing or invalid artifact fails closed, so start a new
-validation instead of retrying that stale parent.
+verifier consume the artifact for their current attempt. After the original
+guarded upload succeeds, the sealer records the plan digest in its job log.
+Collector retries restore the exact run-ID cache before publication admission,
+authenticate its bytes against that original upload and digest, and re-upload
+the unchanged plan and admission for the current attempt. GitHub removes prior
+parent artifacts on a full rerun, so retain the cache and original job logs.
+If the cache is unavailable, an accessible plan artifact can supply the same
+authenticated bytes. Missing or invalid evidence fails closed; retries never
+rebuild the plan, recollect registry observations, or redispatch tests.
 Release Decision also repeats canonical reuse-chain validation before a reused
 run can pass. The sealed target SHA, evidence SHA, policy, changed-path set,
 selected run, root run, source manifest, trusted tooling identity, and child

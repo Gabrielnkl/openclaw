@@ -29,7 +29,8 @@ import {
   pluginSessionMenuActions,
   runControlUiPluginAction,
 } from "../plugins/control-ui-actions.ts";
-import { renderSidebarAgentMenu, renderSidebarIdentityMenu } from "./app-sidebar-agent-menu.ts";
+import { renderSidebarAgentMenu } from "./app-sidebar-agent-menu.ts";
+import { renderSidebarIdentityMenu } from "./app-sidebar-identity-menu.ts";
 import { renderSidebarCustomizeMenu, renderSidebarMoreMenu } from "./app-sidebar-nav-menus.ts";
 import { formatSidebarTimestamp } from "./app-sidebar-session-catalogs.ts";
 import {
@@ -272,7 +273,9 @@ export function renderSidebarSessionMenuForController(controller: SidebarMenusCo
           pinned: session.pinned,
           pinnable: session.pinnable,
           unread: batchRows ? allUnread : session.unread,
+          hiddenFromInvolvingMe: session.hiddenFromInvolvingMe,
           archived: allArchived,
+          archiving: rows.some((row) => context?.sessions.archiveVisibility(row.key) === "pending"),
           category: batchRows ? sharedCategory : (session.category ?? null),
           icon: batchRows ? null : (session.icon ?? null),
           color: batchRows ? null : (session.color ?? null),
@@ -342,6 +345,12 @@ export function renderSidebarSessionMenuForController(controller: SidebarMenusCo
               break;
             case "toggle-pin":
               void host.sessionOrganizer.patchSession(session, { pinned: !session.pinned });
+              break;
+            case "toggle-involving-me":
+              void host.sessionOrganizer.setSessionInvolvement(
+                session,
+                !session.hiddenFromInvolvingMe,
+              );
               break;
             case "toggle-unread":
               void host.sessionOrganizer.patchSession(session, { unread: !session.unread });
@@ -505,8 +514,8 @@ export function renderSidebarSessionSortMenuForController(controller: SidebarMen
     showCron: host.sessionsShowCron,
     showPreview: host.sessionsShowPreview,
     showSystem: host.sessionsShowSystem,
-    hideEmptyGroups: host.sessionsHideEmptyGroups,
-    owners: host.sessionOwnershipVisible ? host.sessionOwnerOptions : [],
+    emptyGroupsMode: host.sessionsEmptyGroupsMode,
+    owners: host.sessionOwnershipVisibility.filters ? host.sessionOwnerOptions : [],
     ownerFilterId: host.sessionOwnerFilterActive ? host.sessionOwnerFilterId : null,
     involvingMe: host.sessionInvolvingMeFilterActive,
     selfOwnerId: host.sessionDataContext?.gateway.snapshot.selfUser?.id ?? null,
@@ -541,8 +550,11 @@ export function renderSidebarSessionSortMenuForController(controller: SidebarMen
       host.sessionOrganizer.setSessionsShowSystem(show);
       controller.closeSessionSortMenu({ restoreFocus: true });
     },
-    onHideEmptyGroupsChange: (hide) => {
-      host.sessionOrganizer.setSessionsHideEmptyGroups(hide);
+    onEmptyGroupsModeChange: (mode) => {
+      if (controller.sessionSortMenuPosition !== position) {
+        return;
+      }
+      host.setSessionsEmptyGroupsMode(mode);
       controller.closeSessionSortMenu({ restoreFocus: true });
     },
     onOpenSessionSources: () => {
@@ -571,7 +583,7 @@ export function renderSidebarCatalogViewMenuForController(controller: SidebarMen
     position,
     trigger: controller.catalogViewMenuTrigger,
     grouping: host.catalogProjectGrouping,
-    owners: host.sessionOwnershipVisible ? host.sessionOwnerOptions : [],
+    owners: host.sessionOwnershipVisibility.filters ? host.sessionOwnerOptions : [],
     ownerFilterId: host.sessionOwnerFilterActive ? host.sessionOwnerFilterId : null,
     involvingMe: host.sessionInvolvingMeFilterActive,
     selfOwnerId: host.sessionDataContext?.gateway.snapshot.selfUser?.id ?? null,

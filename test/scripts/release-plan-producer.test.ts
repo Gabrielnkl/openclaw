@@ -244,6 +244,7 @@ function buildFixtureRepo(root: string, version: string, options: FixtureOptions
   for (const name of [
     "android-release.yml",
     "docker-release.yml",
+    "linux-app-release-request.yml",
     "plugin-npm-release.yml",
     "vercel-container-registry-publish.yml",
     "windows-node-release.yml",
@@ -1657,13 +1658,14 @@ mutateModule.syncBuiltinESMExports();
     expect(plan.inventory.platforms).toEqual([
       { id: "android", source: ".github/workflows/android-release.yml" },
       { id: "docker", source: ".github/workflows/docker-release.yml" },
+      { id: "linux", source: ".github/workflows/linux-app-release-request.yml" },
       { id: "vcr", source: ".github/workflows/vercel-container-registry-publish.yml" },
       { id: "windows", source: ".github/workflows/windows-node-release.yml" },
     ]);
     expect(
       verifyReleasePlanLock(canonicalReleasePlanLockJson(createReleasePlanLock(plan)), params).plan,
     ).toEqual(plan);
-    for (const omitted of ["android", "windows"]) {
+    for (const omitted of ["android", "linux", "windows"]) {
       const partial = structuredClone(plan);
       partial.inventory.platforms = partial.inventory.platforms.filter(({ id }) => id !== omitted);
       expect(() =>
@@ -1717,7 +1719,7 @@ mutateModule.syncBuiltinESMExports();
       }
     }
     if (fault === "unlinked") {
-      for (const id of ["publish_windows", "publish_android"]) {
+      for (const id of ["publish_windows", "publish_android", "publish_linux"]) {
         delete publisher.jobs[id];
       }
     }
@@ -1762,7 +1764,7 @@ mutateModule.syncBuiltinESMExports();
     if (fault === "dormant" || fault === "unlinked") {
       const ids = produceReleasePlan(params).inventory.platforms.map(({ id }) => id);
       expect(ids).toEqual(
-        fault === "unlinked" ? ["docker", "vcr"] : ["android", "docker", "vcr", "windows"],
+        fault === "unlinked" ? ["docker", "vcr"] : ["android", "docker", "linux", "vcr", "windows"],
       );
     } else {
       expect(() => produceReleasePlan(params)).toThrow(/platform|release-publish-children/u);
@@ -1770,7 +1772,7 @@ mutateModule.syncBuiltinESMExports();
     expect(existsSync(sentinel)).toBe(false);
   });
 
-  it("matches the exact current publisher inventory: 95 npm and 91 ClawHub packages", () => {
+  it("matches the exact current npm and ClawHub publisher inventories", () => {
     const root = tempDirs.make("openclaw-release-plan-current-");
     const candidateSha = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: resolve("."),
@@ -1823,36 +1825,22 @@ mutateModule.syncBuiltinESMExports();
     const clawHubPackages = plan.inventory.packages.filter((entry) =>
       entry.targets.includes("clawhub"),
     );
-    expect(npmPackages).toHaveLength(95);
-    expect(clawHubPackages).toHaveLength(91);
-    const coreNpmPackages = new Set([
+    const coreNpmPackages = [
       "@openclaw/ai",
       "@openclaw/gateway-client",
       "@openclaw/gateway-protocol",
       "openclaw",
-    ]);
-    expect(
-      npmPackages
-        .map((entry) => entry.name)
-        .filter((name) => !coreNpmPackages.has(name))
-        .toSorted(),
-    ).toEqual(
-      collectPublishablePluginPackages(root)
-        .map((plugin) => plugin.packageName)
-        .toSorted(),
+    ];
+    expect(npmPackages.map((entry) => entry.name).toSorted()).toEqual(
+      [
+        ...coreNpmPackages,
+        ...collectPublishablePluginPackages(root).map((plugin) => plugin.packageName),
+      ].toSorted(),
     );
     expect(clawHubPackages.map((entry) => entry.name).toSorted()).toEqual(
       collectClawHubPublishablePluginPackages(root)
         .map((plugin) => plugin.packageName)
         .toSorted(),
-    );
-    expect(npmPackages.map((entry) => entry.name)).toEqual(
-      expect.arrayContaining([
-        "@openclaw/ai",
-        "@openclaw/gateway-client",
-        "@openclaw/gateway-protocol",
-        "openclaw",
-      ]),
     );
   });
 

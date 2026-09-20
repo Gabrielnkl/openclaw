@@ -32,6 +32,7 @@ import {
   resolveNpmInstallSpecsForUpdateChannel,
 } from "./install-channel-specs.js";
 import type { InstallSafetyOverrides } from "./install-security-scan.types.js";
+import type { OperatorManagedPluginUpdate } from "./installed-plugin-package-ownership.js";
 import { checkMinHostVersion } from "./min-host-version.js";
 import * as officialInstallRecords from "./official-external-install-records.js";
 import {
@@ -69,6 +70,12 @@ type BasePluginUpdateOutcome = {
 };
 
 export type PluginUpdateOutcome =
+  | (BasePluginUpdateOutcome &
+      Omit<OperatorManagedPluginUpdate, "kind" | "pluginIds"> & {
+        status: "skipped";
+        code: "plugin-operator-managed";
+        guidance: string[];
+      })
   | (BasePluginUpdateOutcome & {
       status: "skipped";
       code?: ClawHubTrustErrorCode;
@@ -104,6 +111,8 @@ export type UpdateInstalledPluginsParams = {
   disableOnFailure?: boolean;
   retainOnUnavailable?: boolean;
   timeoutMs?: number;
+  /** Null removes the forward-work deadline while metadata remains bounded. */
+  workTimeoutMs?: number | null;
   dryRun?: boolean;
   updateChannel?: UpdateChannel;
   officialPluginUpdateChannel?: UpdateChannel;

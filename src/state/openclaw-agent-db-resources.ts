@@ -2,6 +2,7 @@ import path from "node:path";
 import { normalizeAgentId } from "@openclaw/normalization-core/agent-id";
 import { isPathInside } from "../infra/path-guards.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { getOpenClawDatabaseMaintenanceScope } from "./openclaw-state-db-async-lifecycle.js";
 
 export type OpenClawAgentDatabaseAsyncResource = {
   agentId: string;
@@ -58,7 +59,14 @@ export function registerOpenClawAgentDatabaseAsyncResource(
     throw new Error(`Agent database resources are closing: ${owned.path}`);
   }
   resources.active.add(owned);
-  return () => resources.active.delete(owned);
+  const unregister = () => resources.active.delete(owned);
+  getOpenClawDatabaseMaintenanceScope()?.own(unregister, "agent-resources", async () => {
+    owned.revoke();
+    await owned.close();
+    resources.active.delete(owned);
+    resources.closing.delete(owned);
+  });
+  return unregister;
 }
 
 export function revokeAgentDatabaseResources(

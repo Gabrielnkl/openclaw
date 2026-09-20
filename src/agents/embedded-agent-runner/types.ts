@@ -12,7 +12,7 @@ import type { ContextEngineSessionTarget } from "../../context-engine/types.js";
 import type { DiagnosticTraceContext } from "../../infra/diagnostic-trace-context.js";
 import type { AcceptedSessionSpawn } from "../accepted-session-spawn.js";
 import type { AgentRunTerminalReceipt } from "../agent-run-terminal-receipt.js";
-import type { AgentRunTerminalReplySnapshot } from "../agent-run-terminal-reply.js";
+import type { AgentRunTerminalReplySnapshot } from "../agent-run-terminal-reply.types.js";
 import type {
   MessagingToolSend,
   MessagingToolSourceReplyPayload,
@@ -21,6 +21,7 @@ import type { McpConnectAction } from "../mcp-connect-action.js";
 import type { McpAppChannelView } from "../mcp-ui-resource.js";
 import type { FallbackAttempt } from "../model-fallback.types.js";
 import type { ModelRef } from "../model-ref-shared.js";
+import type { ReplyDeliveryState } from "../reply-completion.js";
 import type { AgentRuntimeCredentialSource } from "../runtime-plan/types.js";
 import type { NormalizedUsage } from "../usage.js";
 
@@ -136,6 +137,11 @@ type ExecutionTrace = {
   attempts?: TraceAttempt[];
   fallbackUsed?: boolean;
   runner?: "embedded" | "cli";
+  providerPolicyRetry?: {
+    category: "cyber";
+    provider: string;
+    model: string;
+  };
 };
 
 type RequestShapingTrace = {
@@ -157,6 +163,8 @@ export type ToolSummaryTrace = {
   calls: number;
   tools: string[];
   failures?: number;
+  /** Latest tool failure not cleared by same-tool success, independent of reply presentation. */
+  unresolvedError?: { toolName: string };
   totalToolTimeMs?: number;
 };
 
@@ -273,6 +281,8 @@ export type EmbeddedAgentRunResult = {
   // True if message_tool_only delivered a visible reply to the current source conversation.
   didDeliverSourceReplyViaMessageTool?: boolean;
   sourceReplyDelivered?: true;
+  /** Current-input custody; unlike aggregate sends, this is reset when another input is admitted. */
+  sourceReplyDeliveryState?: ReplyDeliveryState;
   // True if a deterministic approval prompt was sent through the tool-result channel.
   didSendDeterministicApprovalPrompt?: boolean;
   // Texts successfully sent via messaging tools during the run.

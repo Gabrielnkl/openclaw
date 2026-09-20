@@ -14,8 +14,9 @@ import {
   type PeriodIndex,
 } from "./render/html.js";
 import type { TeamReportsHealth } from "./scheduler.js";
+import type { ReportPerson } from "./store-contract.js";
 import type { TeamReportsStore } from "./store.js";
-import type { Period, Person, PersonReport } from "./types.js";
+import type { Period, Person } from "./types.js";
 
 type TeamReportsHttpOptions = {
   basePath: string;
@@ -83,7 +84,7 @@ function absolutePageUrl(req: IncomingMessage, path: string): string | undefined
   }
 }
 
-function personFromReport(member: PersonReport): Person {
+function personFromReport(member: ReportPerson): Person {
   return {
     github: [member.login, ...member.aliases],
     display: member.display,
@@ -95,7 +96,7 @@ function personFromReport(member: PersonReport): Person {
   };
 }
 
-function visiblePeople(configured: Person[], recentReports: PersonReport[]): Person[] {
+function visiblePeople(configured: Person[], recentReports: ReportPerson[]): Person[] {
   const aliases = new Set(
     configured.flatMap((person) => person.github.map((login) => login.toLowerCase())),
   );
@@ -218,7 +219,7 @@ export function createTeamReportsHttpHandler(options: TeamReportsHttpOptions) {
     if (route.segments.length === 0) {
       const periods = await index();
       const latest = periods.day[0];
-      const stored = latest ? await store.getPeriod("day", latest.key) : undefined;
+      const stored = latest ? await store.getPeriodDocument("day", latest.key) : undefined;
       return html(
         renderIndexPage(ctx, periods, {
           orgs: stored?.report.orgs ?? options.orgs(),
@@ -228,11 +229,8 @@ export function createTeamReportsHttpHandler(options: TeamReportsHttpOptions) {
       );
     }
     if (first === "people" && route.segments.length <= 2) {
-      const latest = (await store.listPeriods({ period: "day", limit: 1 }))[0];
-      const recent = latest
-        ? ((await store.getPeriod("day", latest.key))?.report.members ?? [])
-        : [];
-      const people = visiblePeople(options.people(), recent);
+      const latest = await store.latestPeople();
+      const people = visiblePeople(options.people(), latest?.members ?? []);
       if (!key) {
         const endKey = latest?.key ?? new Date().toISOString().slice(0, 10);
         const since = new Date(Date.parse(`${endKey}T00:00:00Z`) - 27 * DAY_MS)
@@ -266,15 +264,16 @@ export function createTeamReportsHttpHandler(options: TeamReportsHttpOptions) {
       } catch {
         return notFound();
       }
-      const stored = await store.getPeriod(first, key);
+      if (format === "report.md") {
+        const stored = await store.getPeriod(first, key);
+        return stored ? send(200, "text/markdown", stored.markdown) : notFound();
+      }
+      const stored = await store.getPeriodDocument(first, key);
       if (!stored) {
         return notFound();
       }
       if (format === "data.json") {
         return json(stored.report);
-      }
-      if (format === "report.md") {
-        return send(200, "text/markdown", stored.markdown);
       }
       return html(
         renderReportPage(

@@ -1,6 +1,5 @@
 /* @vitest-environment jsdom */
 
-import { queryObjects } from "node:v8";
 import { IDBFactory, IDBObjectStore, IDBTransaction } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { collectGarbageForTest } from "../../test-helpers/garbage-collection.ts";
@@ -305,9 +304,7 @@ describe("persistent chat session snapshots", () => {
     }
     await store.flush();
     expect(memoryCache.has(sessionKey)).toBe(false);
-    await collectGarbageForTest(() => {
-      queryObjects(SessionSnapshotStore);
-    });
+    await collectGarbageForTest();
     expect(collectionControl.deref()).toBeUndefined();
     expect(evicted.deref()).toBeUndefined();
     expect(store.readSavedAt("agent:main:newer-0")).not.toBeNull();

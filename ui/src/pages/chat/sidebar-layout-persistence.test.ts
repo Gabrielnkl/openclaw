@@ -17,6 +17,48 @@ import {
 } from "./sidebar-layout.ts";
 
 describe("sidebar session layout settings", () => {
+  it("retains only a normalized task identity on the detail panel", () => {
+    const saved = normalizeSidebarSessionLayouts({
+      main: {
+        columns: [
+          {
+            id: "side",
+            side: "right",
+            activePanelId: "detail",
+            panels: [
+              {
+                id: "detail",
+                slot: "detail",
+                taskId: "  selected-task  ",
+                result: "not persisted",
+              },
+              { id: "workspace", slot: "workspace", taskId: "wrong-slot" },
+            ],
+          },
+        ],
+      },
+    });
+    expect(saved.main?.columns[0]?.panels).toEqual([
+      { id: "detail", slot: "detail", taskId: "selected-task" },
+      { id: "workspace", slot: "workspace" },
+    ]);
+  });
+
+  it.each(["split", "expanded", null, undefined] as const)(
+    "preserves the stored override %s during unrelated layout writes",
+    (override) => {
+      const layout = openSlot({ columns: [] }, "workspace");
+      const current = { main: { ...layout, dashboardPresentationOverride: override } };
+      const stale = {
+        ...layout,
+        dashboardPresentationOverride: override === "expanded" ? null : ("expanded" as const),
+      };
+      const next = updateSidebarSessionLayout(current, "main", openSlot(stale, "terminal"));
+      expect(next.main?.dashboardPresentationOverride).toBe(override);
+      expect(next.main?.columns[0]?.panels.some((panel) => panel.slot === "terminal")).toBe(true);
+    },
+  );
+
   it("uses one persistence key for configured main-session aliases", () => {
     const host = {
       agentsList: { defaultId: "main", mainKey: "main" },
@@ -55,7 +97,7 @@ describe("sidebar session layout settings", () => {
     layout = setSidebarOpen(layout, false);
 
     const persisted = updateSidebarSessionLayout({}, "main", layout).main;
-    expect(persisted).toEqual({ ...layout, dock: "right" });
+    expect(persisted).toEqual({ ...layout, dock: "right", dashboardPresentationOverride: null });
     expect(persisted?.columns[0]?.panels.map((panel) => panel.slot)).toEqual([
       "workspace",
       "terminal",

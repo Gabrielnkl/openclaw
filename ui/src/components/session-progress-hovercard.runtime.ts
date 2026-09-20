@@ -1,6 +1,7 @@
 import type { ProgressCard, ProgressCardGetParams } from "@openclaw/gateway-protocol";
 import { nothing, ReactiveElement, render } from "lit";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
+import { pathForRoute } from "../app-route-paths.ts";
 import type { ApplicationContext } from "../app/context.ts";
 import { resolveControlUiAuthCandidates } from "../app/control-ui-auth.ts";
 import type { ApplicationGateway } from "../app/gateway.ts";
@@ -431,6 +432,7 @@ export class SessionProgressHovercardProvider extends ReactiveElement {
             hasAutomation: sidebarRow.hasAutomation,
             hasActiveRun: sidebarRow.hasActiveRun,
             channelAvatarUrl: sidebarRow.channelAvatarUrl,
+            channelPresentation: sidebarRow.channelPresentation,
             lastMessagePreview: sidebarRow.lastMessagePreview,
             createdActor: sidebarRow.createdActor,
             participants: sidebarRow.participants,
@@ -481,6 +483,18 @@ export class SessionProgressHovercardProvider extends ReactiveElement {
         selfUserId: this.applicationContext?.gateway.snapshot.selfUser?.id,
         avatarAuth: channelAvatarAuth,
         personActivity: this.personActivity(),
+        automationLink: this.applicationContext
+          ? {
+              href: `${pathForRoute("cron", this.applicationContext.basePath)}?${new URLSearchParams({ session: sessionKey, agent: session.agentId! })}`,
+              navigate: () => {
+                const context = this.applicationContext;
+                this.close();
+                context?.navigate("cron", {
+                  search: `?${new URLSearchParams({ session: sessionKey, agent: session.agentId! })}`,
+                });
+              },
+            }
+          : undefined,
         pullRequests,
         progressCard: this.lastProgressCard,
       }),

@@ -16,7 +16,7 @@ import type { EmbeddedAgentRunResult } from "./types.js";
 
 type ProviderErrorPayloadFailoverReason = Extract<
   FailoverReason,
-  "auth" | "auth_permanent" | "billing" | "rate_limit" | "server_error" | "overloaded"
+  "auth" | "auth_permanent" | "billing" | "rate_limit" | "server_error" | "overloaded" | "timeout"
 >;
 
 /**
@@ -73,7 +73,7 @@ export function mergeEmbeddedAgentRunResultForModelFallbackExhaustion(params: {
   };
 }
 
-export function hasDeliberateSilentTerminalReply(result: EmbeddedAgentRunResult): boolean {
+function hasDeliberateSilentTerminalReply(result: EmbeddedAgentRunResult): boolean {
   if (result.meta.error?.kind === "hook_block") {
     return true;
   }
@@ -183,6 +183,7 @@ function classifyProviderErrorPayloadReason(
     case "rate_limit":
     case "server_error":
     case "overloaded":
+    case "timeout":
       return failoverReason;
     default:
       return null;

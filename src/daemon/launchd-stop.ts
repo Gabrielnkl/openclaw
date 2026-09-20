@@ -61,13 +61,16 @@ async function assertGatewayPortReleasedAfterStop(
   env: GatewayServiceEnv,
   assertCurrent?: () => void,
 ): Promise<void> {
-  const { port, probeHosts } = await resolveLaunchAgentGatewayContext(env);
+  const { env: cleanupEnv, port, probeHosts } = await resolveLaunchAgentGatewayContext(env);
   if (port === null) {
     return;
   }
   assertCurrent?.();
   assertGatewayServiceUpdateCurrent();
-  cleanStaleGatewayProcessesSync(port, { assertCurrent: assertGatewayServiceUpdateCurrent });
+  cleanStaleGatewayProcessesSync(port, {
+    env: cleanupEnv,
+    assertCurrent: assertGatewayServiceUpdateCurrent,
+  });
   const diagnostics = await inspectPortUsage(port, {
     probeHosts,
   }).catch(() => null);
@@ -91,6 +94,7 @@ export async function stopLaunchAgent({
   disable: persistDisable,
   onMutation,
   assertCurrent,
+  updateHandoff,
 }: GatewayServiceControlArgs): Promise<void> {
   const serviceEnv = env ?? (process.env as GatewayServiceEnv);
   const domain = resolveLaunchAgentGuiDomain();
@@ -99,9 +103,18 @@ export async function stopLaunchAgent({
   const reportMutation = createGatewayLifecycleMutationReporter(onMutation);
 
   if (await isCurrentProcessInsideLaunchdService(label, process.env)) {
-    throw new Error(
-      `Refusing to stop LaunchAgent ${label} from inside the same launchd service; run this command from an external shell.`,
-    );
+    // A detached update executor can still descend from the serving Gateway.
+    // Keep the updater lazy for ordinary service commands; identity alone is no grant.
+    const authorized =
+      updateHandoff &&
+      (await (
+        await import("../infra/update-managed-service-handoff.js")
+      ).isCurrentManagedServiceUpdateHandoffProcess(updateHandoff));
+    if (!authorized) {
+      throw new Error(
+        `Refusing to stop LaunchAgent ${label} from inside the same launchd service; run this command from an external shell.`,
+      );
+    }
   }
 
   assertCurrent?.();
