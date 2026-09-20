@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
 import { isSqliteWorkerError } from "../infra/sqlite-worker-contract.js";
+import type { SqliteWorkerNativeSettlementOwner } from "../infra/sqlite-worker-operation-settlement.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.types.js";
 import type {
   DetachedRunningTaskCreateParams,
+  DetachedTaskCreateParams,
   CreatedDetachedTaskRun,
 } from "./detached-task-runtime-contract.js";
 import { getTaskFlowRegistryStore } from "./task-flow-registry.store.js";
@@ -16,6 +18,7 @@ import {
 import type { InitialTaskFlowLinkResult } from "./task-initial-flow.kernel.js";
 import { isOneTaskFlowEligible } from "./task-initial-flow.rules.js";
 import { clearTaskActivity, flushTaskActivity } from "./task-registry-activity.js";
+import { readTaskCreationEventTarget } from "./task-registry-agent-event-target.js";
 import type { TaskCreateResult } from "./task-registry-create.kernel.js";
 import {
   maybeDeliverTaskStateChangeUpdate,
@@ -50,13 +53,47 @@ type CoreTaskCreation = {
   assertStores: () => void;
 };
 
+type CreatedTaskRunReceipt = {
+  task: TaskRecord;
+  settleUnstarted: (
+    terminal: Parameters<CreatedDetachedTaskRun["settleUnstarted"]>[0] & {
+      suppressDelivery?: boolean;
+      lastEventAt?: number;
+    },
+    canSettle: (task: TaskRecord) => boolean,
+  ) => Promise<TaskRecord | null>;
+};
+
 export async function createRunningTaskRunCoreWithReceiptAsync(
   params: DetachedRunningTaskCreateParams,
   assertCurrent?: () => void,
 ): Promise<CreatedDetachedTaskRun | null> {
-  const creation = await createTaskRun({ ...params, status: "running" }, assertCurrent);
-  const acknowledged = cloneTaskRecord(creation.task);
+  const receipt = await createTaskRunWithReceipt({ ...params, status: "running" }, assertCurrent);
   let settlement: Promise<boolean> | undefined;
+  return {
+    task: receipt.task,
+    settleUnstarted(terminal, canSettle) {
+      return (settlement ??= receipt
+        .settleUnstarted(terminal, canSettle)
+        .then((task) => task !== null));
+    },
+  };
+}
+
+export function createQueuedTaskRunCoreWithReceiptAsync(
+  params: DetachedTaskCreateParams,
+  assertCurrent?: () => void,
+): Promise<CreatedTaskRunReceipt> {
+  return createTaskRunWithReceipt({ ...params, status: "queued" }, assertCurrent);
+}
+
+async function createTaskRunWithReceipt(
+  params: CreateTaskRecordParams,
+  assertCurrent?: () => void,
+): Promise<CreatedTaskRunReceipt> {
+  const creation = await createTaskRun(params, assertCurrent);
+  const acknowledged = cloneTaskRecord(creation.task);
+  let settlement: Promise<TaskRecord | null> | undefined;
   return {
     task: cloneTaskRecord(acknowledged),
     settleUnstarted(terminal, canSettle) {
@@ -96,11 +133,19 @@ async function createTaskRun(
     childSessionKey: input.params.childSessionKey?.trim(),
   };
   let committed: TaskCreateResult | undefined;
+  let creationOwner: SqliteWorkerNativeSettlementOwner | undefined;
   let flowHookEntered = false;
   const created = await runTaskRegistryWorkerMutation(
     {
       scope,
       admission: context.admission,
+      readEventTarget: () =>
+        readTaskCreationEventTarget(
+          creationOwner?.committed?.facts,
+          "tasks.createRecord",
+          input.taskId,
+        ),
+      taskRowsWritten: () => committed?.persisted ?? false,
       publicationRecords: () =>
         new Map<string, TaskRecord>(
           committed && committed.mutation !== "reused"
@@ -123,6 +168,9 @@ async function createTaskRun(
         context,
         { type: "tasks.createRecord", input },
         assertCreationCurrent,
+        (owner) => {
+          creationOwner = owner;
+        },
       );
       committed = result;
       return result;
@@ -154,14 +202,14 @@ async function createTaskRun(
 async function settleUnstartedTask(
   creation: CoreTaskCreation,
   task: TaskRecord,
-  terminal: Parameters<CreatedDetachedTaskRun["settleUnstarted"]>[0],
+  terminal: Parameters<CreatedTaskRunReceipt["settleUnstarted"]>[0],
   canSettle: (task: TaskRecord) => boolean,
-): Promise<boolean> {
+): Promise<TaskRecord | null> {
   const { context, store, flowStore, assertStores } = creation;
   const runId = task.runId;
   assertStores();
   if (!runId?.trim() || !canSettle(task)) {
-    return false;
+    return null;
   }
   const expectedTask: TaskPersistenceReceipt = {
     taskId: task.taskId,
@@ -200,6 +248,7 @@ async function settleUnstartedTask(
     {
       scope,
       admission: context.admission,
+      taskRowsWritten: () => committed?.persisted ?? false,
       publicationRecords: () =>
         new Map<string, TaskRecord>(committed ? [[committed.task.taskId, committed.task]] : []),
       beforeObservers: async () => {
@@ -234,6 +283,8 @@ async function settleUnstartedTask(
               endedAt: terminal.endedAt,
               error: terminal.error,
               terminalSummary: terminal.terminalSummary,
+              suppressDelivery: terminal.suppressDelivery,
+              lastEventAt: terminal.lastEventAt,
             },
             now: Date.now(),
           },
@@ -260,10 +311,10 @@ async function settleUnstartedTask(
       });
     }
   }
-  return settled !== null;
+  return settled ? cloneTaskRecord(settled.task) : null;
 }
 
-async function finishTaskMutation(
+export async function finishTaskMutation(
   context: OpenClawStateWorkerContext,
   store: TaskRegistryStore,
   flowStore: FlowStore,
@@ -338,7 +389,7 @@ async function finishManagedTaskCancellation(
   }
 }
 
-function retainTaskMutationFlowEffects(
+export function retainTaskMutationFlowEffects(
   context: OpenClawStateWorkerContext,
   store: TaskRegistryStore,
   flowStore: FlowStore,

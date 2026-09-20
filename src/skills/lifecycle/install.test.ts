@@ -123,10 +123,14 @@ afterAll(async () => {
   vi.mocked(hasBinary).mockReset();
   vi.mocked(resolveBrewExecutable).mockReset();
   vi.mocked(isContainerEnvironment).mockReset();
+  // skills.status starts native watchers; close them before removing their fixture roots.
+  await closeSkillsWatchers(true);
   await workspaceSuite.cleanup();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // skills.status acquires real watchers; retire them before another suite borrows the worker.
+  await closeSkillsWatchers(true);
   vi.restoreAllMocks();
 });
 

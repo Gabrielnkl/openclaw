@@ -115,6 +115,15 @@ export function isSqliteWorkerStoreAvailable(store: object): boolean {
   return resolveSqliteWorkerBroker().isAvailable(store);
 }
 
+/** Internal identity for the existing canonical actor, never a transferable authority. */
+export function getSqliteWorkerActorIdentity(store: object): object {
+  return resolveSqliteWorkerBroker().getActorIdentity(store);
+}
+
+export function retireSqliteWorkerActor(identity: object): Promise<void> {
+  return withCallerErrors(resolveSqliteWorkerBroker().retireActor(identity));
+}
+
 /** Recorded orphan custody at its original shared-state opening path. */
 export function hasUnclaimedSharedStateSqliteCleanup(databasePath: string): boolean {
   return resolveSqliteWorkerBroker().hasUnclaimedSharedStateCleanup(databasePath);
@@ -146,6 +155,37 @@ export function openSqliteWorkerStore<Operations extends SqliteWorkerOperations>
     );
   }
   return resolveSqliteWorkerBroker().open<Operations>(options);
+}
+
+/** Admit the canonical per-agent execution group through its retained host owner. */
+export function openAgentDatabaseSqliteWorkerStore<Operations extends SqliteWorkerOperations>(
+  options: SqliteWorkerStoreOptions,
+  custody: {
+    stateContext?: SqliteWorkerStateContext;
+    stateDatabasePath?: string;
+    onNativeStopped?: (stopped: Promise<void>) => void;
+    assertCurrent(): void;
+    createAdmission: SqliteWorkerAdmissionFactory;
+  },
+): Promise<SqliteWorkerStore<Operations> | undefined> {
+  if (!isMainThread) {
+    return Promise.reject(
+      new SqliteWorkerError("Agent admission requires its host owner", "unavailable"),
+    );
+  }
+  custody.assertCurrent();
+  return withCallerErrors(
+    resolveSqliteWorkerBroker().open<Operations>(
+      options,
+      custody.stateContext,
+      () => custody.assertCurrent(),
+      {
+        createAdmission: custody.createAdmission,
+        stateDatabasePath: custody.stateDatabasePath,
+        onNativeStopped: custody.onNativeStopped,
+      },
+    ),
+  );
 }
 
 /** Host-internal admission for the canonical shared-state actor. */

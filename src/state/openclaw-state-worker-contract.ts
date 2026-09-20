@@ -1,6 +1,9 @@
 import type { AuthProfileRowRead, UserModelAuthProfile } from "../agents/auth-profiles/types.js";
 import type { NativeHookRelayStoreWorkerOperations } from "../agents/harness/native-hook-relay-store.worker-contract.js";
+import type { SubagentRegistryWrite } from "../agents/subagents/registry/subagent-registry.store.kernel.js";
+import type { ManagedWorktreeRecord } from "../agents/worktrees/types.js";
 import type { AuditEventListQuery, AuditEventListPage } from "../audit/audit-event-types.js";
+import type { AuditWriterOperations } from "../audit/audit-event-writer.types.js";
 import type { ClawInstallSchemaVersionRow } from "../claws/provenance-runtime-read.kernel.js";
 import type { readSqliteDatabaseBloat } from "../commands/doctor-db-bloat.read.js";
 import type { ConfigHealthPatch } from "../config/io.health-state.kernel.js";
@@ -9,6 +12,7 @@ import type {
   ConfigHealthEntryBasis,
 } from "../config/io.health-state.types.js";
 import type { CronStoreWorkerOperations } from "../cron/store/load-worker.types.js";
+import type { CronRunRecoveryWorkerOperations } from "../cron/store/run-recovery.types.js";
 import type { CronStoreSaveWorkerOperations } from "../cron/store/save-worker.types.js";
 import type { FleetRegistryWriteOperations } from "../fleet/registry.types.js";
 import type {
@@ -24,6 +28,7 @@ import type { WebPushWorkerOperations } from "../infra/push-web-store.worker-con
 import type { SessionDeliveryWorkerOperations } from "../infra/session-delivery-queue.worker-contract.js";
 import type { PreparedSqliteAuditRecord } from "../infra/sqlite-audit-record.kernel.js";
 import type { SqliteFileGeneration } from "../infra/sqlite-file-generation.js";
+import type { SqliteWorkerPreparedBackend } from "../infra/sqlite-worker-contract.js";
 import type { TelemetryWorkerOperations } from "../infra/telemetry-worker-contract.js";
 import type { readRemoteModelCatalog } from "../model-catalog/remote-store.js";
 import type { PluginStateWorkerOperations } from "../plugin-state/plugin-state-worker-contract.js";
@@ -41,30 +46,38 @@ import type {
 } from "../sessions/session-state-events.kernel.js";
 import type { SessionUpstreamLink } from "../sessions/session-upstream-links.kernel.js";
 import type { DeviceAuthEntry } from "../shared/device-auth.js";
+import type { commitSkillUploadInDatabase } from "../skills/lifecycle/upload-store-commit.js";
 import type { SkillProposalEvent, SkillProposalRecord } from "../skills/workshop/types.js";
 import type { TaskRegistryWorkerOperations } from "../tasks/task-registry.worker-contract.js";
 import type { TranscriptReadOperations } from "../transcripts/store-worker-contract.js";
 import type { AgentProvenance } from "./agent-provenance.types.js";
 import type { PreparedBackupRunRecord } from "./backup-run-records.kernel.js";
+import type { OpenClawAgentDatabaseWorkerLeaseReceipt } from "./openclaw-agent-db-lease.js";
 import type { OpenClawStateLeaseIdentity } from "./openclaw-state-lease-store.js";
 import type { UserPreferenceWorkerOperations } from "./user-preferences.types.js";
-import type { UserProfileReadWorkerOperations } from "./user-profiles.worker.js";
+import type { UserProfileWorkerOperations } from "./user-profiles.worker.js";
 
 /** Commands share one physical shared-state actor; bindings belong to commands, not open input. */
 export type OpenClawStateWorkerOperations = WebPushWorkerOperations &
+  AuditWriterOperations &
   NativeHookRelayStoreWorkerOperations &
   TelemetryWorkerOperations &
   HostedCatalogSnapshotWorkerOperations &
   PluginStateWorkerOperations &
   UserPreferenceWorkerOperations &
-  UserProfileReadWorkerOperations &
+  UserProfileWorkerOperations &
   CronStoreWorkerOperations &
+  CronRunRecoveryWorkerOperations &
   CronStoreSaveWorkerOperations &
   FleetRegistryWriteOperations &
   SessionDeliveryWorkerOperations &
   DeliveryQueueWorkerOperations &
   TranscriptReadOperations &
   TaskRegistryWorkerOperations & {
+    "skillUploads.commit": {
+      input: Parameters<typeof commitSkillUploadInDatabase>[0];
+      output: ReturnType<typeof commitSkillUploadInDatabase>;
+    };
     "audit.events.list": {
       input: AuditEventListQuery;
       output: AuditEventListPage;
@@ -126,10 +139,12 @@ export type OpenClawStateWorkerOperations = WebPushWorkerOperations &
       input: undefined;
       output: ReturnType<typeof readSqliteDatabaseBloat>;
     };
+    "subagents.persistChanges": { input: SubagentRegistryWrite; output: { writeId: string } };
     "sessionUpstream.listWatched": { input: undefined; output: SessionUpstreamLink[] };
     "backup.recordOutcome": { input: PreparedBackupRunRecord; output: void };
     "projects.findRoot": { input: { repoRoot: string }; output: string | undefined };
     "projects.list": { input: undefined; output: ProjectRegistryRecord[] };
+    "worktrees.list": { input: undefined; output: ManagedWorktreeRecord[] };
     "projects.resolve": { input: { id: string }; output: ProjectRegistryRecord | undefined };
     "projects.insert": {
       input: { project: ProjectRegistryInsert; lease: OpenClawStateLeaseIdentity };
@@ -197,3 +212,17 @@ export type OpenClawStateWorkerInspectionOperations = {
   "database.generationMatches": { input: { generation: SqliteFileGeneration }; output: boolean };
   "database.inspectIdle": { input: undefined; output: "healthy" | "retire" };
 };
+
+/** Only the retiring native owner's host can dispatch its exact cleanup receipt. */
+export type OpenClawStateWorkerCleanupOperations = {
+  "agentDatabases.releaseExitedLease": {
+    input: OpenClawAgentDatabaseWorkerLeaseReceipt;
+    output: void;
+  };
+};
+
+export type OpenClawStateWorkerBackend = SqliteWorkerPreparedBackend<
+  OpenClawStateWorkerOperations &
+    OpenClawStateWorkerInspectionOperations &
+    OpenClawStateWorkerCleanupOperations
+>;

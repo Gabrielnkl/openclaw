@@ -4,6 +4,15 @@ import { en } from "./en.ts";
 // Settings copy loads with its lazy page or search, not the startup shell.
 const enSettings = {
   connection: {
+    browser: {
+      title: "Browser",
+      savedSignIn: "Saved sign-in for this gateway",
+      forgetDevice: "Forget this browser",
+      confirmTitle: "Forget this browser?",
+      confirmMessage:
+        "Removes the saved sign-in for {gateway} and signs this tab out, clearing any active password or session credential, then reconnects fresh. Other gateways, your preferences, and this browser’s device identity are kept. You may need to sign in or approve this browser again.",
+      confirmLabel: "Forget",
+    },
     ping: {
       title: "Gateway ping",
       latest: "Latest ping",
@@ -471,7 +480,7 @@ const enSettings = {
       fallback: "Fallback Model",
       noFallback: "No fallback model",
       selectModel: "Select a model",
-      noModels: "Configure a provider before selecting default models.",
+      noModels: "Configure a chat provider to select a primary, utility, or fallback model.",
       discoveringMore: "Discovering more models…",
       discoverFailed: "More models could not be discovered.",
       retryDiscover: "Retry",
@@ -638,7 +647,7 @@ const enSettings = {
       computerControlHint:
         "Starts enabled. After this Mac is paired and macOS access is granted, the paired Gateway can move the pointer, click, and type without per-action confirmation. High risk.",
       computerControlProvider: "Computer Control provider",
-      unattendedDesktop: "Unattended desktop hosting",
+      unattendedDesktop: "Keep computer awake",
       unattendedDesktopHint:
         "Keep this Mac awake between jobs while it is connected and hosting. Manual lock and logout are still respected; OpenClaw never unlocks the Mac.",
       desktopAvailability: "Desktop availability",
@@ -655,6 +664,21 @@ const enSettings = {
         "Allow signed tools to drive UI automation via Peekaboo Bridge. Requires Computer Control; otherwise run Peekaboo's own Mac app.",
       browser: "Browser",
       chromeExtension: "Chrome extension",
+      chromeExtensionOnMac: "Chrome on this Mac",
+      chromeExtensionDetected: "Installed",
+      chromeExtensionNotInstalled: "Not installed",
+      chromeExtensionUnknown: "Status unavailable",
+      chromeExtensionChecking: "Checking installation…",
+      chromeExtensionCheckAgain: "Check again",
+      chromeExtensionRepair: "Repair Mac connection",
+      chromeExtensionRepairHint:
+        "The extension is installed. Repair the Mac connection to enable automatic pairing.",
+      chromeExtensionEnableHint:
+        "The extension is installed but not enabled. Open Chrome and approve or enable OpenClaw.",
+      chromeExtensionStatusFailed:
+        "Could not check Chrome installation automatically. You can still run setup. Make sure the OpenClaw Mac app and CLI are up to date.",
+      chromeExtensionStatusUnsupported:
+        "Automatic installation checks require an updated Mac app. Open Chrome to check whether OpenClaw is installed and enabled.",
       chromeExtensionSetup: "Set up Chrome on this Mac",
       chromeExtensionHint:
         "Prepare the OpenClaw extension on this Mac, then approve it in Chrome. This does not install on a remote Gateway.",
@@ -741,9 +765,9 @@ const enSettings = {
       preciseLocationReadOnlyHint: "Manage precise location access in Settings.",
       preciseLocationStatuses: { enabled: "Enabled", disabled: "Disabled" },
       privacy: "Privacy",
-      activePresence: "Active computer presence",
+      activePresence: "System-wide presence detection",
       activePresenceHint:
-        "Share this Mac's idle duration so OpenClaw can identify the Mac you used most recently and route node alerts. Never sends keys, pointer positions, app names, or window titles. Requires Accessibility.",
+        "OpenClaw activity identifies this Mac without extra permissions. Enable this to also detect activity in other apps. Shares only idle duration, never keys, pointer positions, app names, or window titles. Requires Accessibility.",
     },
     deviceTalk: {
       title: "This Mac",
@@ -948,7 +972,7 @@ const enSettings = {
     appearance: {
       intro: "Theme, chat, and sidebar preferences for this Control UI client.",
       theme: "Theme",
-      chooseTheme: "Choose a theme family.",
+      chooseTheme: "Choosing a different theme resets its fonts and accent colors.",
       themeUnavailable: "{id} is unavailable. Using Claw until the theme becomes available again.",
       typography: "Typography",
       fonts: {
@@ -977,7 +1001,7 @@ const enSettings = {
       accent: "Accent color",
       accentHint: "Choose an accent color for buttons, highlights, and other controls.",
       customAccent: "Custom color",
-      usingInheritedAccent: "Using inherited accent",
+      usingThemeAccent: "Using theme accent",
       usingAccent: "Using {value}",
       accents: {
         default: "Theme default",
@@ -1016,6 +1040,9 @@ const enSettings = {
         "Optional CSS width for the centered transcript, such as 960px, 82%, or min(1280px, 82%).",
       messageWidthInvalid:
         "Enter a CSS width such as 960px, 82%, min(1280px, 82%), or calc(100% - 2rem).",
+      showTaskProgress: "Show task progress cards",
+      showTaskProgressHint:
+        "Show task progress in the chat composer. Hiding it does not stop the agent or clear saved progress. Dashboard widgets and session previews are unchanged.",
       collapseTaskProgress: "Collapse task progress by default",
       collapseTaskProgressHint:
         "Start task progress collapsed. It can expand when the response finishes if you are at the end of the chat. A manual close keeps it collapsed for that session.",

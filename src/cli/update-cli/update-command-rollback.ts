@@ -38,13 +38,17 @@ import {
   type UpdateConfigSnapshot,
 } from "./update-command-config-snapshot.js";
 import { readPackageUpdateIdentity } from "./update-command-package.js";
-import type { UpdateServiceDefinitionRecovery } from "./update-command-service-context-types.js";
+import type {
+  UpdateServiceDefinitionRecovery,
+  OriginalManagedServiceRuntime,
+} from "./update-command-service-context-types.js";
 import { withOwnedManagedUpdateEnv } from "./update-command-service-env.js";
 import {
   createWindowsTaskAutoStartGuard,
   revalidateManagedGatewayServiceAfterUpdate,
 } from "./update-command-service-maintenance.js";
 import { assertGatewayServiceManagementAllowedForUpdate } from "./update-command-service-plan.js";
+import { compensateOriginalManagedService } from "./update-command-service-recovery.js";
 import {
   maybeRestartService,
   maybeResumeWindowsTaskAutoStartAfterPackageUpdate,
@@ -63,6 +67,8 @@ export async function rollbackFailedUpdate(params: {
   candidateSchemaVersions?: OpenClawSchemaVersions;
   previousSchemaVersions?: OpenClawSchemaVersions;
   previousVerified?: boolean;
+  originalManagedServiceRuntime?: OriginalManagedServiceRuntime;
+  allowGatewayRestart?: boolean;
   configSnapshot: ConfigFileSnapshot;
   activationConfig?: UpdateConfigSnapshot;
   opts: UpdateCommandOptions;
@@ -77,6 +83,7 @@ export async function rollbackFailedUpdate(params: {
   stoppedForRollback?: PreManagedServiceStop;
   verifiedAtMs?: number;
   pendingRecoveryReason?: string;
+  originalServiceRecovery?: "healthy" | "failed";
 }> {
   const { preManagedServiceStop: before, packageTransaction, opts } = params;
   const run = opts.run;
@@ -128,6 +135,11 @@ export async function rollbackFailedUpdate(params: {
         "Full-state checkpoint recovery is deferred; the retained record and artifacts were left unchanged.",
     };
   }
+  // A's original service is independent of B's package transaction. Keep the
+  // existing admission and explicit recovery refusals above this selection.
+  if (params.originalManagedServiceRuntime) {
+    return compensateOriginalManagedService(params, assertCurrent);
+  }
   let result = params.result;
   const config =
     params.configSnapshot.sourceConfigBeforeMigrations ?? params.configSnapshot.sourceConfig;
@@ -144,6 +156,7 @@ export async function rollbackFailedUpdate(params: {
     result: {
       ...result,
       status: "error" as const,
+      rollbackOutcome: result.rollbackOutcome ?? { status: "not-attempted" as const, reason },
       reason:
         result.recovery?.serviceRestartSafe === true && result.recovery.packageRollbackVerified
           ? (params.result.reason ?? reason)
@@ -329,6 +342,10 @@ export async function rollbackFailedUpdate(params: {
           throw new Error("The retained package transaction is unavailable.");
         }
         assertRestorationCurrent();
+        result.rollbackOutcome = {
+          status: "failed",
+          reason: "Previous generation restoration did not complete",
+        };
         // Package cleanup retains this executor after the native lock closes.
         const { activePackageRoot, ...restored } = await packageTransaction.rollback(assertCurrent);
         // Restoration changes the active runtime before any later reporting or
@@ -418,6 +435,10 @@ export async function rollbackFailedUpdate(params: {
     if (restoration.refused) {
       return restoration.refused;
     }
+    result.rollbackOutcome = {
+      status: "succeeded",
+      reason: "Previous package and configuration restored",
+    };
     const { stopped } = restoration;
     // A no-service or --no-restart update owns file restoration only. Preserve
     // its original failure without claiming or changing a Gateway generation.

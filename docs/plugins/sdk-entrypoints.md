@@ -59,6 +59,7 @@ Use `openclaw plugins inspect <id>` to see a plugin's shape.
 - [Plugin setup and config](/plugins/sdk-setup) - manifest and setup entry loading
 - [Building channel plugins](/plugins/sdk-channel-plugins) - building the `ChannelPlugin` object
 - [Building provider plugins](/plugins/sdk-provider-plugins) - provider registration and hooks
+- [Decision models](/plugins/sdk-overview/capabilities#decision-models-contract-version-1) - `openclaw/plugin-sdk/decisions` and the typed decision provider contract
 
 ## MCP subprocess runtime
 
@@ -92,3 +93,45 @@ Use `openclaw/plugin-sdk/agent-workspace-runtime` to declare, register, and acqu
 configured remote workspace during registration so callers cannot fall back to
 local files before its service starts. Register its bridge when ready and release
 it when the service stops. Callers keep their existing document authorization.
+
+`createWorkspaceBootstrapFilePolicy({ workspaceDir, config })` lets adapters
+restrict this bridge to native bootstrap documents and the configured
+`bootstrap-extra-files` patterns. Check `canList` for directory metadata,
+`canRead` for file bytes, and `canWrite` for the four owner-editable documents.
+Directory access does not grant reads of other files. The underlying bridge
+still enforces filesystem containment and returns the read's canonical source.
+
+Workspace access that has not started or has stopped throws
+`WorkspaceAccessUnavailableError`. Use `isWorkspaceAccessUnavailableError(error)`
+to recognize this condition through wrapped errors or separate SDK instances.
+The error code is `WORKSPACE_ACCESS_UNAVAILABLE`; do not match message text.
+
+The optional `memoryFiles` provider keeps workspace Memory files on the host while
+the native index, embedding providers and original sessions stay on Gateway. It
+supplies discovery, file inspection, reads and change notifications. Both indexing
+and `memory_get` use it; index publication rechecks the host file. The canonical
+source returned with a read supplies provenance, without resolving a stale Gateway
+copy. Stopping the workspace binding revokes retained file access and subscriptions.
+The Memory file worker supports `--files <workspace>` for native file
+operations without opening a host index or receiving embedding credentials. A
+provider can invoke it through its existing subprocess transport.
+`createWorkspaceMemoryFileClient` maps Gateway/host paths and preserves native
+errors for this worker. Supply `request` for one JSON exchange and `subscribe`
+for the `--watch-files` JSON-line stream, plus the binding's abort signal.
+Neither callback depends on Codex; providers own transport and authorization.
+
+`memoryFiles.maintenance` routes existing dreaming, promotion, corpus and forget
+file operations to the host. Compound writes reuse native atomic publication and
+conflict handling; maintenance decisions, locks and SQLite state stay on Gateway.
+A remote binding without maintenance support fails instead of using Gateway files.
+The file worker implements these operations and native change notifications.
+Paired-node adapter wiring is still required before a complete storage cutover.
+
+## Tool failure diagnostics
+
+Agent harnesses can import `readToolOperatorHint(error)` from
+`openclaw/plugin-sdk/agent-harness-runtime` to read optional operator advice
+attached to a tool failure. Include it only in the operator log. Keep it out of
+model responses, tool-result callbacks, and serialized transcripts, and preserve
+the original error message. An unannotated or immutable error needs no substitute
+hint; the reader returns `undefined` when no advice is available.

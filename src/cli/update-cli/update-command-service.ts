@@ -41,6 +41,7 @@ import {
 import type {
   ManagedGatewayUpdateVerdict,
   UpdateServiceDefinitionRecovery,
+  OriginalManagedServiceRuntime,
 } from "./update-command-service-context-types.js";
 import { resolveServiceRefreshEnv } from "./update-command-service-env.js";
 import {
@@ -54,10 +55,8 @@ import {
   resolveGatewayServiceManagementBlockMessageForUpdate,
   resolveUpdatedGatewayRestartPort,
 } from "./update-command-service-plan.js";
-import {
-  hasLoadedLaunchdKeepAliveSupervisor,
-  recoverLaunchAgentAndRecheckGatewayHealth,
-} from "./update-command-service-recovery.js";
+import { recoverLaunchAgentAndRecheckGatewayHealth } from "./update-command-service-recovery.js";
+import { hasLoadedLaunchdKeepAliveSupervisor } from "./update-command-supervisor.js";
 import { recordUpdateGatewayHealth, verifyUpdatedGateway } from "./update-command-verification.js";
 
 export {
@@ -218,6 +217,7 @@ export async function recordFailedUpdateGatewayState(
 }
 
 export async function maybeRestartService(params: {
+  originalManagedServiceRuntime?: OriginalManagedServiceRuntime;
   serviceLoadBoundary?: UpdateServiceLoadBoundary;
   shouldRestart: boolean;
   result: UpdateRunResult;
@@ -408,7 +408,13 @@ export async function maybeRestartService(params: {
       },
     });
     assertCurrent();
-    if (verification.stopReason === "gateway-readiness-pending") {
+    if (verification.stopReason === "still-starting" && activation.result.status !== "error") {
+      activation.result.reason = "still-starting";
+    }
+    if (
+      verification.stopReason === "gateway-readiness-pending" ||
+      verification.stopReason === "still-starting"
+    ) {
       return "readiness-pending" as const;
     }
     if (!verification.ok) {
@@ -478,12 +484,19 @@ export async function maybeRestartService(params: {
             });
             assertCurrent();
             refreshedGatewayHealth =
-              health.healthy || health.waitOutcome === "timeout" ? health : undefined;
+              health.healthy ||
+              health.waitOutcome === "timeout" ||
+              health.waitOutcome === "still-starting"
+                ? health
+                : undefined;
             recordUpdateGatewayHealth(params.opts.run, health, activation.gatewayPort);
           }
         } catch (err) {
           assertCurrent();
-          if (err instanceof UpdateCommandRecoveryPendingError) {
+          if (
+            err instanceof UpdateCommandRecoveryPendingError ||
+            err instanceof UpdateServiceLoadBoundaryError
+          ) {
             throw err;
           }
           if (activation.serviceLoadBoundary) {
@@ -651,7 +664,10 @@ export async function maybeRestartService(params: {
       }
     } catch (err) {
       assertCurrent();
-      if (err instanceof UpdateServiceLoadBoundaryError) {
+      if (
+        err instanceof UpdateServiceLoadBoundaryError ||
+        err instanceof UpdateCommandRecoveryPendingError
+      ) {
         throw err;
       }
       if (err instanceof GatewayRestartHealthError && !updatedInstallRestartNeedsServiceRootProof) {

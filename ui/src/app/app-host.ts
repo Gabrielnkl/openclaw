@@ -1,16 +1,16 @@
 import type { PropertyValues } from "lit";
 import { property, query, state } from "lit/decorators.js";
 import type { GatewayBrowserClient, GatewayEventFrame } from "../api/gateway.ts";
-import "../components/app-topbar.ts";
-import "../components/assistant-panel.ts";
-import "../components/modal-dialog.ts";
 import {
   formatDocumentTitle,
   isSettingsNavigationRoute,
   titleForRoute,
 } from "../app-navigation.ts";
-import "../components/resizable-divider.ts";
+import "../components/app-topbar.ts";
+import "../components/assistant-panel.ts";
+import "../components/modal-dialog.ts";
 import { isSessionRouteId } from "../app-route-paths.ts";
+import "../components/resizable-divider.ts";
 import { APP_ROUTE_IDS, type RouteId } from "../app-routes.ts";
 import type {
   CommandPaletteElement,
@@ -71,11 +71,8 @@ import {
 import { postNativeNavState, type NativeNavState } from "./native-nav-state.ts";
 import { readNativeHistoryState, type NativeHistoryState } from "./native-web-chrome.ts";
 import { resolveOnboardingMode } from "./onboarding-mode.ts";
-import {
-  changedServerUiPrefs,
-  isApplyingServerUiPrefs,
-  pushServerUiPrefs,
-} from "./server-prefs.ts";
+import { changedServerUiPrefs } from "./server-prefs-intent.ts";
+import { isApplyingServerUiPrefs, pushServerUiPrefs } from "./server-prefs.ts";
 import { setSettingsChangeListener } from "./settings.ts";
 import {
   isStaleChunkImportError,
@@ -235,7 +232,7 @@ class OpenClawShell
   private readonly shellChrome = new ShellChromeOwner(this);
   private readonly shellGateway = new ShellGatewayOwner(this);
 
-  get context(): ApplicationContext<RouteId> | undefined {
+  get context(): ApplicationContext | undefined {
     return this.runtime?.context;
   }
 
@@ -250,7 +247,7 @@ class OpenClawShell
     return routeId !== undefined && !isSettingsNavigationRoute(routeId) && !this.onboardingMode;
   }
 
-  storedOutboxScopeHost(context: ApplicationContext<RouteId>): StoredOutboxScopeHost {
+  storedOutboxScopeHost(context: ApplicationContext): StoredOutboxScopeHost {
     const gatewaySnapshot = context.gateway.snapshot;
     return {
       settings: { gatewayUrl: context.gateway.connection.gatewayUrl },
@@ -261,7 +258,7 @@ class OpenClawShell
   }
 
   private chatTitleContext(
-    context: ApplicationContext<RouteId>,
+    context: ApplicationContext,
     outboxScopeHost: StoredOutboxScopeHost,
   ): string {
     const sessionKey = this.activeSessionKey;
@@ -353,7 +350,10 @@ class OpenClawShell
       .watch(
         () => this.context?.gateway,
         (gateway, notify) => gateway.subscribe(notify),
-        (gateway) => this.shellGateway.synchronizeGateway(gateway.snapshot),
+        (gateway) => {
+          this.shellChrome.synchronizeCommandPaletteScope();
+          this.shellGateway.synchronizeGateway(gateway.snapshot);
+        },
       )
       .effect(
         () => this.context?.gateway,
@@ -625,6 +625,10 @@ class OpenClawShell
   }
   readonly togglePendingDebugOverlayMode = () => this.shellChrome.togglePendingDebugOverlayMode();
   readonly openPalette = this.shellChrome.openPalette;
+  readonly closePendingPalette = this.shellChrome.closePendingPalette;
+  get commandPaletteLoading() {
+    return this.shellChrome.commandPaletteLoading;
+  }
   readonly refreshControlUi = (): Promise<boolean> => {
     const context = this.context;
     if (!context) {
@@ -754,6 +758,7 @@ class OpenClawShell
   override render() {
     if (this.workspaceChromeVisible) {
       this.lazyCustomElements.preload(APP_SIDEBAR_ELEMENT);
+      this.lazyCustomElements.preload(this.commandPaletteElement);
     }
     return renderApplicationShell(this);
   }

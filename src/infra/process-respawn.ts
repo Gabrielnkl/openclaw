@@ -8,6 +8,7 @@ import {
 import { isContainerEnvironment } from "./container-environment.js";
 import { isTruthyEnvValue } from "./env.js";
 import { formatErrorMessage } from "./errors.js";
+import { rewritePnpmVersionedOpenClawEntryPath } from "./openclaw-root.js";
 import { triggerOpenClawRestart } from "./restart.js";
 import { detectGatewayRespawnSupervisor } from "./supervisor-markers.js";
 
@@ -18,27 +19,12 @@ type GatewayRespawnResult = {
   handoffSpawned?: Promise<boolean>;
 };
 
-type GatewayUpdateRespawnResult = {
-  mode: "spawned" | "disabled" | "failed";
-  pid?: number;
-  detail?: string;
-  child?: ChildProcess;
-};
+type GatewayUpdateRespawnResult =
+  | { mode: "spawned"; pid?: number; child: ChildProcess }
+  | { mode: "disabled" | "failed"; detail?: string };
 type GatewayRespawnOptions = {
   env?: NodeJS.ProcessEnv;
 };
-
-const PNPM_VERSIONED_OPENCLAW_ENTRY_PATTERN =
-  /^(.*?)([\\/])node_modules\2\.pnpm\2openclaw@[^\\/]+\2node_modules\2openclaw\2.+$/;
-
-function rewritePnpmVersionedOpenClawEntryPath(entryPath: string): string {
-  // pnpm can expose argv[1] as a versioned realpath that self-update removes.
-  // Respawn through the stable OpenClaw package wrapper instead.
-  return entryPath.replace(
-    PNPM_VERSIONED_OPENCLAW_ENTRY_PATTERN,
-    "$1$2node_modules$2openclaw$2openclaw.mjs",
-  );
-}
 
 /**
  * Attempt to restart this process with a fresh PID.
