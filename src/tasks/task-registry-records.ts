@@ -398,6 +398,19 @@ export function applyTaskRecordPatch(
   if (becomesTerminal && patch.endedAt === undefined) {
     updated.endedAt = patch.lastEventAt ?? now ?? Date.now();
   }
+  // A terminal transition must never move the durable lifecycle clock
+  // backwards. Stale timestamps (retry, duplicate delivery, skewed worker
+  // clock) are clamped, not rejected, so the terminal state still lands while
+  // newer-wins UI reconciliation cannot resurrect it as running. Non-terminal
+  // backdating is preserved for detached runtimes reporting pre-insert times.
+  if (
+    isTerminalTaskStatus(updated.status) &&
+    typeof current.lastEventAt === "number" &&
+    typeof updated.lastEventAt === "number" &&
+    updated.lastEventAt < current.lastEventAt
+  ) {
+    updated.lastEventAt = current.lastEventAt;
+  }
   const next = normalizeTaskTimestamps(updated);
   if (Object.hasOwn(patch, "error") && patch.error === undefined) {
     delete next.error;

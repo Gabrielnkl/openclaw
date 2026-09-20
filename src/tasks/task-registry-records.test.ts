@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeTaskTimestamps } from "./task-registry-records.js";
+import { applyTaskRecordPatch, normalizeTaskTimestamps } from "./task-registry-records.js";
 import type { TaskRecord, TaskStatus } from "./task-registry.types.js";
 
 function task(status: TaskStatus, overrides: Partial<TaskRecord> = {}): TaskRecord {
@@ -34,5 +34,55 @@ describe("normalizeTaskTimestamps", () => {
 
   it("does not add an end time to active records", () => {
     expect(normalizeTaskTimestamps(task("running", { lastEventAt: 250 })).endedAt).toBeUndefined();
+  });
+});
+
+describe("applyTaskRecordPatch lifecycle clock", () => {
+  it("clamps a stale terminal update instead of moving lastEventAt backwards", () => {
+    const current = task("running", { lastEventAt: 300, startedAt: 110 });
+    const next = applyTaskRecordPatch(current, {
+      status: "succeeded",
+      endedAt: 200,
+      lastEventAt: 200,
+    });
+
+    expect(next.status).toBe("succeeded");
+    expect(next.lastEventAt).toBe(300);
+  });
+
+  it("preserves forward terminal timestamps", () => {
+    const current = task("running", { lastEventAt: 300, startedAt: 110 });
+    const next = applyTaskRecordPatch(current, {
+      status: "succeeded",
+      endedAt: 400,
+      lastEventAt: 400,
+    });
+
+    expect(next.status).toBe("succeeded");
+    expect(next.lastEventAt).toBe(400);
+    expect(next.endedAt).toBe(400);
+  });
+
+  it("clamps a stale failed transition the same way", () => {
+    const current = task("running", { lastEventAt: 300, startedAt: 110 });
+    const next = applyTaskRecordPatch(current, {
+      status: "failed",
+      endedAt: 200,
+      lastEventAt: 200,
+    });
+
+    expect(next.status).toBe("failed");
+    expect(next.lastEventAt).toBe(300);
+  });
+
+  it("preserves pre-insert backdating for non-terminal updates", () => {
+    const current = task("running", { lastEventAt: 300, startedAt: 110 });
+    const next = applyTaskRecordPatch(current, {
+      startedAt: 100,
+      lastEventAt: 200,
+    });
+
+    expect(next.status).toBe("running");
+    expect(next.lastEventAt).toBe(200);
   });
 });
