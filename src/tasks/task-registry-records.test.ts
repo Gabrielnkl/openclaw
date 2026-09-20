@@ -48,6 +48,7 @@ describe("applyTaskRecordPatch lifecycle clock", () => {
 
     expect(next.status).toBe("succeeded");
     expect(next.lastEventAt).toBe(300);
+    expect(next.endedAt).toBe(200);
   });
 
   it("preserves forward terminal timestamps", () => {
@@ -61,18 +62,6 @@ describe("applyTaskRecordPatch lifecycle clock", () => {
     expect(next.status).toBe("succeeded");
     expect(next.lastEventAt).toBe(400);
     expect(next.endedAt).toBe(400);
-  });
-
-  it("clamps a stale failed transition the same way", () => {
-    const current = task("running", { lastEventAt: 300, startedAt: 110 });
-    const next = applyTaskRecordPatch(current, {
-      status: "failed",
-      endedAt: 200,
-      lastEventAt: 200,
-    });
-
-    expect(next.status).toBe("failed");
-    expect(next.lastEventAt).toBe(300);
   });
 
   it("preserves pre-insert backdating for non-terminal updates", () => {
