@@ -84,6 +84,31 @@ export function enqueuePendingNodeAction(params: {
   if (existing) {
     return { action: existing, created: false };
   }
+  // Idempotency keys are client-retry identity (see NodeInvokeParamsSchema:
+  // "idempotency allows safe retries") and survive pairing-generation rotation,
+  // so a retry after re-pair must not fork a second executable action. Pull and
+  // acknowledgement stay generation-scoped, which would strand a survivor left
+  // in the retired generation; rebind it into the current generation instead.
+  // Queued actions carry no transferred agent or approval authority
+  // (nodes.invoke.ts refuses to queue those), and pull re-validates the command
+  // allowlist, so rebinding preserves the original authorization posture.
+  const retained = pendingNodeActionsById.get(params.nodeId) ?? [];
+  const duplicates = retained.filter((entry) => entry.idempotencyKey === params.idempotencyKey);
+  const survivor = duplicates[0];
+  if (survivor) {
+    survivor.pairingGeneration = params.pairingGeneration;
+    if (duplicates.length > 1) {
+      // Collapse legacy duplicates so one key maps to one action ID.
+      const survivorId = survivor.id;
+      pendingNodeActionsById.set(
+        params.nodeId,
+        retained.filter(
+          (entry) => entry.id === survivorId || entry.idempotencyKey !== params.idempotencyKey,
+        ),
+      );
+    }
+    return { action: survivor, created: false };
+  }
   const action: PendingNodeAction = {
     id: randomUUID(),
     nodeId: params.nodeId,
