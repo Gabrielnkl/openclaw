@@ -11,6 +11,10 @@ const mocks = vi.hoisted(() => ({
     nodeId,
     key: `generation:${nodeId}:1`,
   })),
+  captureNodePairingState: vi.fn(async (nodeId: string) => ({
+    identity: { nodeId, key: `identity:${nodeId}:1` },
+    generation: { nodeId, key: `generation:${nodeId}:1` },
+  })),
   isNodePairingGenerationCurrent: vi.fn(async () => true),
   isNodeCommandAllowed: vi.fn((): { ok: true } | { ok: false; reason: string } => ({ ok: true })),
   resolveNodeCommandAllowlist: vi.fn(() => new Set<string>()),
@@ -29,6 +33,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../infra/device-pairing-node-state.js", () => ({
   captureNodePairingGeneration: mocks.captureNodePairingGeneration,
+  captureNodePairingState: mocks.captureNodePairingState,
   isNodePairingGenerationCurrent: mocks.isNodePairingGenerationCurrent,
 }));
 

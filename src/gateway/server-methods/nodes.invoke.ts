@@ -5,7 +5,10 @@ import {
   missingScopeErrorShape,
   validateNodeInvokeParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import { captureNodePairingGeneration } from "../../infra/device-pairing-node-state.js";
+import {
+  captureNodePairingGeneration,
+  captureNodePairingState,
+} from "../../infra/device-pairing-node-state.js";
 import {
   isAdminOnlyNodeInvokeCommand,
   isBrowserProxyNodeInvokeCommand,
@@ -17,7 +20,11 @@ import { isNodeCommandAllowed, resolveNodeCommandAllowlist } from "../node-comma
 import { applyPluginNodeInvokePolicy } from "../node-invoke-plugin-policy.js";
 import { invokeNodeWithReadinessRetry } from "../node-invoke-readiness.js";
 import { sanitizeNodeInvokeParamsForForwarding } from "../node-invoke-sanitize.js";
-import { enqueuePendingNodeAction, removePendingNodeAction } from "../node-runtime-state.js";
+import {
+  enqueuePendingNodeAction,
+  removePendingNodeAction,
+  restorePendingNodeActionGeneration,
+} from "../node-runtime-state.js";
 import { captureNodeWakeLifecycle, releaseNodeWakeLifecycle } from "../node-wake-state.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { buildNodeCommandRejectionHint } from "./node-command-rejection-hint.js";
@@ -528,10 +535,28 @@ export const nodeInvokeHandlers: GatewayRequestHandlers = {
           ) {
             // Foreground-only iOS commands become pullable pending actions instead
             // of failing permanently while the device is locked/backgrounded.
+            // Bind the queued command to the current pairing identity as well as
+            // its generation: the admission-time generation can rotate while
+            // policy and wake work await, and a queued command must never move
+            // to a pairing with a different authenticated device identity.
+            const pairingState = await awaitWithinDeadline(
+              () => captureNodePairingState(nodeId),
+              invokeDeadlineAtMs,
+              () => performance.now(),
+            );
+            if (pairingState === ABSOLUTE_DEADLINE_EXPIRED) {
+              respondIfInvokeExpired();
+              return;
+            }
+            if (!pairingState || pairingState.generation?.key !== generation.key) {
+              respondPairingChanged(respond);
+              return;
+            }
             const paramsJSON = toPendingParamsJSON(forwardedParams.params);
             const queued = enqueuePendingNodeAction({
               nodeId,
               pairingGeneration: generation.key,
+              pairingIdentity: pairingState.identity.key,
               command,
               paramsJSON,
               idempotencyKey: p.idempotencyKey,
@@ -557,6 +582,14 @@ export const nodeInvokeHandlers: GatewayRequestHandlers = {
                   nodeId,
                   pairingGeneration: generation.key,
                   actionId: queued.action.id,
+                  ttlMs: nodeInvokePolicy.pendingActionTtlMs,
+                });
+              } else if (queued.reboundFrom !== undefined) {
+                // Undo this call's rebind so a failed RPC leaves state as found.
+                restorePendingNodeActionGeneration({
+                  nodeId,
+                  actionId: queued.action.id,
+                  pairingGeneration: queued.reboundFrom,
                   ttlMs: nodeInvokePolicy.pendingActionTtlMs,
                 });
               }

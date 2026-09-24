@@ -10,6 +10,7 @@ export type PendingNodeAction = {
   id: string;
   nodeId: string;
   pairingGeneration: string;
+  pairingIdentity?: string;
   command: string;
   paramsJSON?: string;
   idempotencyKey: string;
@@ -66,13 +67,14 @@ export function replacePendingNodeActionsForGeneration(params: {
 export function enqueuePendingNodeAction(params: {
   nodeId: string;
   pairingGeneration: string;
+  pairingIdentity?: string;
   command: string;
   paramsJSON?: string;
   idempotencyKey: string;
   ttlMs: number;
   maxPerNode: number;
   nowMs?: number;
-}): { action: PendingNodeAction; created: boolean } {
+}): { action: PendingNodeAction; created: boolean; reboundFrom?: string } {
   const nowMs = params.nowMs ?? Date.now();
   const queue = prunePendingNodeActions({
     nodeId: params.nodeId,
@@ -85,17 +87,28 @@ export function enqueuePendingNodeAction(params: {
     return { action: existing, created: false };
   }
   // Idempotency keys are client-retry identity (see NodeInvokeParamsSchema:
-  // "idempotency allows safe retries") and survive pairing-generation rotation,
-  // so a retry after re-pair must not fork a second executable action. Pull and
-  // acknowledgement stay generation-scoped, which would strand a survivor left
-  // in the retired generation; rebind it into the current generation instead.
-  // Queued actions carry no transferred agent or approval authority
-  // (nodes.invoke.ts refuses to queue those), and pull re-validates the command
-  // allowlist, so rebinding preserves the original authorization posture.
+  // "idempotency allows safe retries") and survive routine pairing-generation
+  // rotation, so a retry after re-pair must not fork a second executable
+  // action. Pull and acknowledgement stay generation-scoped, which would strand
+  // a survivor left in the retired generation; rebind it into the current
+  // generation instead. Rebinding is fenced by pairing identity: the generation
+  // incorporates the device public key, node token, and approved surface, so a
+  // new generation can represent a different authenticated device. A survivor
+  // is rebound only when its recorded identity matches the current one; a
+  // changed or unknown identity fails closed to a fresh action, leaving the
+  // earlier command inaccessible to the new pairing. Queued actions carry no
+  // transferred agent or approval authority (nodes.invoke.ts refuses to queue
+  // those), and pull re-validates the command allowlist, so a fenced rebind
+  // preserves the original authorization posture.
   const retained = pendingNodeActionsById.get(params.nodeId) ?? [];
   const duplicates = retained.filter((entry) => entry.idempotencyKey === params.idempotencyKey);
   const survivor = duplicates[0];
-  if (survivor) {
+  if (
+    survivor &&
+    params.pairingIdentity !== undefined &&
+    survivor.pairingIdentity === params.pairingIdentity
+  ) {
+    const reboundFrom = survivor.pairingGeneration;
     survivor.pairingGeneration = params.pairingGeneration;
     if (duplicates.length > 1) {
       // Collapse legacy duplicates so one key maps to one action ID.
@@ -107,12 +120,17 @@ export function enqueuePendingNodeAction(params: {
         ),
       );
     }
-    return { action: survivor, created: false };
+    return {
+      action: survivor,
+      created: false,
+      ...(reboundFrom === params.pairingGeneration ? {} : { reboundFrom }),
+    };
   }
   const action: PendingNodeAction = {
     id: randomUUID(),
     nodeId: params.nodeId,
     pairingGeneration: params.pairingGeneration,
+    ...(params.pairingIdentity !== undefined ? { pairingIdentity: params.pairingIdentity } : {}),
     command: params.command,
     paramsJSON: params.paramsJSON,
     idempotencyKey: params.idempotencyKey,
@@ -190,6 +208,30 @@ export function removePendingNodeAction(params: {
     ...params,
     replacement: remaining,
   });
+}
+
+/**
+ * Restores a rebound action to its previous generation. Used to roll back an
+ * enqueue-time rebind when the surrounding RPC fails after the rebind (for
+ * example pairing rotation during wake), leaving state exactly as found.
+ */
+export function restorePendingNodeActionGeneration(params: {
+  nodeId: string;
+  actionId: string;
+  pairingGeneration: string;
+  ttlMs: number;
+}): boolean {
+  const retained = prunePendingNodeActions({
+    nodeId: params.nodeId,
+    nowMs: Date.now(),
+    ttlMs: params.ttlMs,
+  });
+  const entry = retained.find((item) => item.id === params.actionId);
+  if (!entry) {
+    return false;
+  }
+  entry.pairingGeneration = params.pairingGeneration;
+  return true;
 }
 
 function clearPendingNodeActions(nodeId: string): void {

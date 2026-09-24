@@ -46,6 +46,7 @@ type MockNodeConfig = {
 
 const mocks = vi.hoisted(() => ({
   captureNodePairingGeneration: vi.fn(),
+  captureNodePairingState: vi.fn(),
   getRuntimeConfig: vi.fn(() => ({})),
   isNodePairingGenerationCurrent: vi.fn(),
   resolveNodeCommandAllowlist: vi.fn<(cfg: MockNodeConfig) => Set<string>>(() => new Set()),
@@ -85,6 +86,7 @@ vi.mock("../../config/io.js", () => ({
 
 vi.mock("../../infra/device-pairing-node-state.js", () => ({
   captureNodePairingGeneration: mocks.captureNodePairingGeneration,
+  captureNodePairingState: mocks.captureNodePairingState,
   isNodePairingGenerationCurrent: mocks.isNodePairingGenerationCurrent,
 }));
 
@@ -549,6 +551,14 @@ async function ackPending(
   return respond;
 }
 
+function mockPairing(nodeId: string, generationKey: string, identityKey: string) {
+  mocks.captureNodePairingGeneration.mockResolvedValue({ nodeId, key: generationKey });
+  mocks.captureNodePairingState.mockResolvedValue({
+    identity: { nodeId, key: identityKey },
+    generation: { nodeId, key: generationKey },
+  });
+}
+
 describe("plugin surface refresh", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -750,6 +760,10 @@ describe("node.invoke APNs wake path", () => {
     mocks.captureNodePairingGeneration.mockReset().mockImplementation(async (nodeId: string) => ({
       nodeId,
       key: `generation:${nodeId}:1`,
+    }));
+    mocks.captureNodePairingState.mockReset().mockImplementation(async (nodeId: string) => ({
+      identity: { nodeId, key: `identity:${nodeId}:1` },
+      generation: { nodeId, key: `generation:${nodeId}:1` },
     }));
     mocks.getRuntimeConfig.mockClear();
     mocks.getRuntimeConfig.mockReturnValue({});
@@ -3199,6 +3213,10 @@ describe("node.invoke APNs wake path", () => {
       nodeId,
       key: `generation:${nodeId}:2`,
     });
+    mocks.captureNodePairingState.mockResolvedValue({
+      identity: { nodeId, key: `identity:${nodeId}:1` },
+      generation: { nodeId, key: `generation:${nodeId}:2` },
+    });
     await invokeNode({
       nodeRegistry,
       requestParams: {
@@ -3260,6 +3278,113 @@ describe("node.invoke APNs wake path", () => {
       command: "canvas.navigate",
       paramsJSON: JSON.stringify({ url: "http://example.com/first" }),
     });
+  });
+
+  it("rebinds a queued foreground action when the same device identity re-pairs", async () => {
+    const nodeId = "ios-node-rebind-same-identity";
+    mocks.loadApnsRegistration.mockResolvedValue(null);
+    const nodeRegistry = createForegroundUnavailableNodeRegistry({
+      nodeId,
+      commands: ["canvas.navigate"],
+      platform: "iOS 26.4.0",
+    });
+
+    await invokeNode({
+      nodeRegistry,
+      requestParams: {
+        nodeId,
+        command: "canvas.navigate",
+        idempotencyKey: "idem-rebind",
+      },
+    });
+    const firstPullPayload = requireRespondPayload(
+      firstRespondCall(await pullPending(nodeId, ["canvas.navigate"])),
+      "pre-rotation pull response",
+    );
+    const firstActionId = requireString(
+      (firstPullPayload.actions as Array<{ id?: string }> | undefined)?.[0]?.id,
+      "pre-rotation queued action id",
+    );
+
+    // Same authenticated device, new pairing generation: the retry must resolve
+    // to the original queued action instead of forking a duplicate.
+    mockPairing(nodeId, `generation:${nodeId}:2`, `identity:${nodeId}:1`);
+    await invokeNode({
+      nodeRegistry,
+      requestParams: {
+        nodeId,
+        command: "canvas.navigate",
+        idempotencyKey: "idem-rebind",
+      },
+    });
+
+    const secondPullPayload = requireRespondPayload(
+      firstRespondCall(await pullPending(nodeId, ["canvas.navigate"])),
+      "post-rotation pull response",
+    );
+    expect((secondPullPayload.actions as unknown[] | undefined)?.length).toBe(1);
+    expect((secondPullPayload.actions as Array<{ id?: string }> | undefined)?.[0]?.id).toBe(
+      firstActionId,
+    );
+
+    expect(
+      firstRespondCall(await ackPending(nodeId, [firstActionId], ["canvas.navigate"])),
+    ).toMatchObject([true, { remainingCount: 0 }, undefined]);
+    const drainedPullPayload = requireRespondPayload(
+      firstRespondCall(await pullPending(nodeId, ["canvas.navigate"])),
+      "post-ack pull response",
+    );
+    expect((drainedPullPayload.actions as unknown[] | undefined)?.length).toBe(0);
+  });
+
+  it("does not expose a queued foreground action to a replaced device identity", async () => {
+    const nodeId = "ios-node-replaced-identity";
+    mocks.loadApnsRegistration.mockResolvedValue(null);
+    const nodeRegistry = createForegroundUnavailableNodeRegistry({
+      nodeId,
+      commands: ["canvas.navigate"],
+      platform: "iOS 26.4.0",
+    });
+
+    await invokeNode({
+      nodeRegistry,
+      requestParams: {
+        nodeId,
+        command: "canvas.navigate",
+        idempotencyKey: "idem-replaced-identity",
+      },
+    });
+    const firstPullPayload = requireRespondPayload(
+      firstRespondCall(await pullPending(nodeId, ["canvas.navigate"])),
+      "pre-rotation pull response",
+    );
+    const firstActionId = requireString(
+      (firstPullPayload.actions as Array<{ id?: string }> | undefined)?.[0]?.id,
+      "pre-rotation queued action id",
+    );
+
+    // Different authenticated device under the same node id: the retry queues a
+    // fresh action for the new pairing and the earlier command stays hidden.
+    mockPairing(nodeId, `generation:${nodeId}:2`, `identity:${nodeId}:2`);
+    await invokeNode({
+      nodeRegistry,
+      requestParams: {
+        nodeId,
+        command: "canvas.navigate",
+        idempotencyKey: "idem-replaced-identity",
+      },
+    });
+
+    const secondPullPayload = requireRespondPayload(
+      firstRespondCall(await pullPending(nodeId, ["canvas.navigate"])),
+      "post-rotation pull response",
+    );
+    expect((secondPullPayload.actions as unknown[] | undefined)?.length).toBe(1);
+    const secondActionId = requireString(
+      (secondPullPayload.actions as Array<{ id?: string }> | undefined)?.[0]?.id,
+      "post-rotation queued action id",
+    );
+    expect(secondActionId).not.toBe(firstActionId);
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
